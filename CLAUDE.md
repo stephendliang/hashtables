@@ -47,6 +47,8 @@ irrelevant to the SIMD hot path. All key parameters are `const uint64_t *`.
 - Backends: AVX-512, AVX2 (movemask+pext, BMI2), scalar (SWAR)
 - Delete: set slot to 0, no backshift, no tombstones
 - Probe termination: sentinel overflow bit check (not empty-slot scan)
+- Prefetch: `_prefetch()` (5 cache lines, read paths),
+  `_prefetch_insert()` (1 cache line, insert paths)
 
 ### `simd_map_bitstealing.h` — size-agnostic set, bit-stealing overflow (32 data slots)
 
@@ -65,6 +67,8 @@ in the data slots themselves instead of a dedicated sentinel, reclaiming all
 - Delete: `&= OVF_FIELD_MASK` (preserves ghost overflow bits)
 - Insert: inherits ghost overflow bits from reused slots via OR
 - Probe termination: SIMD overflow test across all slots (vtestmw / vtestz)
+- Prefetch: `_prefetch()` (5 cache lines, read paths),
+  `_prefetch_insert()` (1 cache line, insert paths)
 
 ### `simd_kv_sentinel.h` / `simd_kv_bitstealing.h` — size-agnostic KV maps
 
@@ -122,10 +126,15 @@ is the hash chains from `crc32(0, w[0])` instead of `crc32(khi[31:0], klo)`
 
 - **Prefetch pipelining**: `_prefetch()` / `_prefetch_insert()` issued PF
   iterations ahead of the operation. Overlaps DRAM latency with computation.
-  PF=24 is typical for 128-bit maps. **Dual-mode prefetch**: `_prefetch()`
-  issues 5 cache lines (metadata + 4 key lines) for read paths;
-  `_prefetch_insert()` issues 1 cache line (metadata only) for insert/delete
-  paths. Key/value writes use write-allocate through the store buffer.
+  PF=20 is optimal for insert-only (1-line prefetch has less fill buffer
+  pressure than the old 5-line, so closer PF works); PF=24-28 for mixed
+  workloads. **Dual-mode prefetch**: `_prefetch()` issues 5 cache lines
+  (metadata + 4 key lines) for read paths; `_prefetch_insert()` issues
+  1 cache line (metadata only) for insert/delete paths. Delete uses
+  metadata-only despite reading key data — full 5-line for deletes adds
+  6-10% regression from fill buffer pressure (benchmarked: meta wins at
+  every PF value in 50/25/25 churn). Key/value writes use write-allocate
+  through the store buffer.
   The 5-line read prefetch was empirically optimal for lookups — tested
   alternatives that all regressed: two-tier L1/L2 (+60%), full 9-line L1
   (+50%), post-match key prefetch (no effect). Using 5-line prefetch for
@@ -175,6 +184,7 @@ is the hash chains from `crc32(0, w[0])` instead of `crc32(khi[31:0], klo)`
 | `bench_map128_delete.c` | map128 | A/B: rehash vs displacement backshift delete |
 | `bench_map128_delete_pf.c` | map128 | Raw vs prefetch-pipelined delete throughput |
 | `bench_kv_layout.c` | generic KV | Grid search: 3 layouts × 2 overflow × PF sweep. 16 instantiations. TSV output. |
+| `bench_kv_pf_tuning.c` | generic KV | PF distance sweep + delete prefetch mode A/B. Sentinel inline (KW=2, VW=1). TSV output. |
 | `bench_kv_vs_boost.c` | generic KV | KV sentinel/bitstealing vs boost::unordered_flat_map (C side). Linked with C++ driver. |
 | `bench_kv_vs_boost_main.cpp` | generic KV | C++ driver: boost benchmark + orchestration. 10 workloads: insert-only, 5 read/write ratios, 4 churn profiles. TSV output. |
 
@@ -191,6 +201,7 @@ is the hash chains from `crc32(0, w[0])` instead of `crc32(khi[31:0], klo)`
 | `WHY_NOT_PHF.md` | Analysis of why perfect hash maps lose to open addressing at scale |
 | `KV_LAYOUT_ANALYSIS.md` | KV value layout strategy benchmark: inline vs separate vs hybrid, ANOVA analysis across sentinel and bitstealing |
 | `KV_BOOST_COMPARISON.md` | KV map vs boost::unordered_flat_map benchmark: 10 workloads, ANOVA analysis, crossover analysis |
+| `analyze_kv_pf_tuning.py` | Tabular analysis of PF tuning TSV runs: median ns/op vs PF, optimal PF, meta vs full pairwise |
 
 ## Performance characteristics (2M keys, AVX2, i9-12900HK)
 
@@ -244,6 +255,9 @@ cc -O3 -march=native -mno-avx2 -mno-avx512f -std=gnu11 -o test_kv_scalar test_kv
 
 # KV layout benchmark (16 instantiations, PF sweep, churn)
 cc -O3 -march=native -std=gnu11 -o bench_kv bench_kv_layout.c
+
+# KV PF tuning (PF sweep + delete prefetch A/B)
+cc -O3 -march=native -std=gnu11 -o bench_pf bench_kv_pf_tuning.c
 
 # KV vs boost::unordered_flat_map (C/C++ linkage)
 cc -O3 -march=native -std=gnu11 -c bench_kv_vs_boost.c

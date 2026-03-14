@@ -142,6 +142,23 @@ static inline void SM_(_prefetch)(const struct SIMD_MAP_NAME *m,
 #endif
 }
 
+/* Lightweight prefetch for insert/delete paths: metadata line only.
+ * Key writes use write-allocate through the store buffer. */
+static inline void SM_(_prefetch_insert)(const struct SIMD_MAP_NAME *m,
+                                          const uint64_t *key) {
+#if defined(__SSE4_2__)
+    uint32_t a = 0;
+    for (int i = 0; i < SIMD_MAP_WORDS; i++)
+        a = (uint32_t)_mm_crc32_u64(a, key[i]);
+    uint32_t gi = a & m->mask;
+    _mm_prefetch(SM_(_group)(m, gi), _MM_HINT_T0);
+#else
+    struct SM_(_h) h = SM_(_hash)(key);
+    uint32_t gi = h.lo & m->mask;
+    __builtin_prefetch(SM_(_group)(m, gi), 0, 3);
+#endif
+}
+
 /* --- SIMD backends --- */
 
 #if defined(__AVX512F__)

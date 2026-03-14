@@ -23,9 +23,9 @@
 
 | Map | Median | p vs boost |
 |-----|--------|------------|
-| **sentinel** | **14.3** | p<0.001 *** |
-| **bitstealing** | **14.4** | p<0.001 *** |
-| boost | 24.4 | — |
+| **sentinel** | **14.1** | p<0.001 *** |
+| **bitstealing** | **14.2** | p<0.001 *** |
+| boost | 23.9 | — |
 
 Our maps beat boost by **41%** on pure inserts.
 
@@ -33,26 +33,26 @@ Our maps beat boost by **41%** on pure inserts.
 
 | Workload | sentinel | bitstealing | boost | Winner |
 |----------|----------|-------------|-------|--------|
-| rw_95_5 (95% ins, 5% read) | 17.6 | **17.4** | 19.2 | SIMD (9% faster) |
-| rw_75_25 | **24.5** | 25.0 | 29.2 | sentinel (16% faster) |
-| rw_50_50 | 29.4 | **29.2** | 34.6 | SIMD (16% faster) |
-| rw_25_75 | **30.1** | 30.8 | 34.0 | sentinel (11% faster) |
-| rw_5_95 (5% ins, 95% read) | 28.0 | **27.6** | 30.8 | SIMD (10% faster) |
+| rw_95_5 (95% ins, 5% read) | **17.4** | 17.6 | 19.1 | sentinel (9% faster) |
+| rw_75_25 | **24.2** | 24.8 | 28.8 | sentinel (16% faster) |
+| rw_50_50 | 29.7 | **29.3** | 34.0 | SIMD (14% faster) |
+| rw_25_75 | **29.5** | 29.9 | 33.0 | sentinel (11% faster) |
+| rw_5_95 (5% ins, 95% read) | 27.0 | **26.8** | 29.5 | SIMD (9% faster) |
 
 **Our maps win every insert/read ratio.** All pairwise comparisons are
-p<0.001 or p<0.01. The margin ranges from 9% (rw_95_5) to 16% (rw_75_25,
-rw_50_50).
+p<0.001 or p<0.01. The margin ranges from 9% (rw_95_5, rw_5_95) to 16%
+(rw_75_25).
 
 ### Churn (1M init, 2M mixed ops with read + insert + delete)
 
 | Workload | sentinel | bitstealing | boost | Winner |
 |----------|----------|-------------|-------|--------|
-| churn_80_10_10 | 32.0 | **31.5** | 40.2 | SIMD (22% faster) |
-| churn_50_25_25 | **30.7** | 31.0 | 42.1 | sentinel (27% faster) |
-| churn_33_33_34 | 30.2 | **29.6** | 42.5 | SIMD (30% faster) |
-| churn_20_40_40 | **27.4** | 27.7 | 41.9 | sentinel (35% faster) |
+| churn_80_10_10 | 31.2 | **30.9** | 38.2 | SIMD (19% faster) |
+| churn_50_25_25 | 30.1 | **29.9** | 39.8 | SIMD (25% faster) |
+| churn_33_33_34 | 28.5 | **28.4** | 40.8 | SIMD (30% faster) |
+| churn_20_40_40 | **27.0** | 27.2 | 41.4 | sentinel (35% faster) |
 
-**Our maps dominate all churn workloads by 22-35%.** All pairwise differences
+**Our maps dominate all churn workloads by 19-35%.** All pairwise differences
 are p<0.001. The churn advantage is even larger than insert/read because
 delete-heavy mixes benefit from metadata-only prefetch (delete only needs the
 metadata line to clear a slot).
