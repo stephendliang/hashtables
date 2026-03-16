@@ -6,41 +6,41 @@
 #define SIMD_MAP_NAME      kv_s1_sent
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     1
-#include "simd_kv_sentinel.h"
+#define SIMD_MAP_LAYOUT     1
+#include "simd_sentinel.h"
 
 #define SIMD_MAP_NAME      kv_s2_sent
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     2
-#include "simd_kv_sentinel.h"
+#define SIMD_MAP_LAYOUT     2
+#include "simd_sentinel.h"
 
 #define SIMD_MAP_NAME      kv_s3_sent
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     3
-#define SIMD_KV_BLOCK_STRIDE 4
-#include "simd_kv_sentinel.h"
+#define SIMD_MAP_LAYOUT     3
+#define SIMD_MAP_BLOCK_STRIDE 4
+#include "simd_sentinel.h"
 
 /* Bitstealing: strategies 1, 2, 3 (N=4) — KW=2, VW=1 */
 #define SIMD_MAP_NAME      kv_s1_bs
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     1
-#include "simd_kv_bitstealing.h"
+#define SIMD_MAP_LAYOUT     1
+#include "simd_bitstealing.h"
 
 #define SIMD_MAP_NAME      kv_s2_bs
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     2
-#include "simd_kv_bitstealing.h"
+#define SIMD_MAP_LAYOUT     2
+#include "simd_bitstealing.h"
 
 #define SIMD_MAP_NAME      kv_s3_bs
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     3
-#define SIMD_KV_BLOCK_STRIDE 4
-#include "simd_kv_bitstealing.h"
+#define SIMD_MAP_LAYOUT     3
+#define SIMD_MAP_BLOCK_STRIDE 4
+#include "simd_bitstealing.h"
 
 #define N 2000000
 #define KW 2

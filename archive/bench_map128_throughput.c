@@ -1,14 +1,14 @@
 /*
- * Mixed-workload benchmark: sentinel vs bitstealing simd_map128.
+ * Mixed-workload benchmark: sentinel vs bitstealing simd_set128.
  *
  * Compile twice — once per header variant:
  *   cc -O3 -march=native -std=gnu11 -o /tmp/bench_s  bench_map128_throughput.c
  *   cc -O3 -march=native -std=gnu11 -DBITSTEALING -o /tmp/bench_bs bench_map128_throughput.c
  */
 #ifdef BITSTEALING
-#include "simd_map128_bitstealing.h"
+#include "simd_set128_bitstealing.h"
 #else
-#include "simd_map128_sentinel.h"
+#include "simd_set128_sentinel.h"
 #endif
 
 #include <stdio.h>
@@ -26,38 +26,38 @@ static double elapsed_ns(struct timespec t0, struct timespec t1, int ops) {
 }
 
 /* Pipelined insert: prefetch PF slots ahead */
-static void bench_insert_pf(struct simd_map128 *m,
+static void bench_insert_pf(struct simd_set128 *m,
                              uint64_t *klo, uint64_t *khi,
                              int n, int pf) {
     for (int i = 0; i < n; i++) {
         if (i + pf < n)
-            simd_map128_prefetch(m, klo[i + pf], khi[i + pf]);
-        simd_map128_insert_unique(m, klo[i], khi[i]);
+            simd_set128_prefetch(m, klo[i + pf], khi[i + pf]);
+        simd_set128_insert_unique(m, klo[i], khi[i]);
     }
 }
 
 /* Pipelined contains */
-static int bench_contains_pf(struct simd_map128 *m,
+static int bench_contains_pf(struct simd_set128 *m,
                               uint64_t *klo, uint64_t *khi,
                               int n, int pf) {
     int found = 0;
     for (int i = 0; i < n; i++) {
         if (i + pf < n)
-            simd_map128_prefetch(m, klo[i + pf], khi[i + pf]);
-        found += simd_map128_contains(m, klo[i], khi[i]);
+            simd_set128_prefetch(m, klo[i + pf], khi[i + pf]);
+        found += simd_set128_contains(m, klo[i], khi[i]);
     }
     return found;
 }
 
 /* Pipelined delete */
-static int bench_delete_pf(struct simd_map128 *m,
+static int bench_delete_pf(struct simd_set128 *m,
                             uint64_t *klo, uint64_t *khi,
                             int n, int pf) {
     int deleted = 0;
     for (int i = 0; i < n; i++) {
         if (i + pf < n)
-            simd_map128_prefetch(m, klo[i + pf], khi[i + pf]);
-        deleted += simd_map128_delete(m, klo[i], khi[i]);
+            simd_set128_prefetch(m, klo[i + pf], khi[i + pf]);
+        deleted += simd_set128_delete(m, klo[i], khi[i]);
     }
     return deleted;
 }
@@ -101,14 +101,14 @@ int main(void) {
     struct timespec t0, t1;
 
 #ifdef BITSTEALING
-    printf("=== simd_map128 BITSTEALING (N=%d, PF=%d) ===\n", N, PF);
+    printf("=== simd_set128 BITSTEALING (N=%d, PF=%d) ===\n", N, PF);
 #else
-    printf("=== simd_map128 SENTINEL (N=%d, PF=%d) ===\n", N, PF);
+    printf("=== simd_set128 SENTINEL (N=%d, PF=%d) ===\n", N, PF);
 #endif
 
     /* --- 1. Bulk insert (pipelined, unique) --- */
-    struct simd_map128 m;
-    simd_map128_init_cap(&m, N);
+    struct simd_set128 m;
+    simd_set128_init_cap(&m, N);
 
     clock_gettime(CLOCK_MONOTONIC, &t0);
     bench_insert_pf(&m, klo, khi, N, PF);
@@ -148,9 +148,9 @@ int main(void) {
                 if (idx + PF - i < N && i + PF < CHURN) {
                     int pidx = del_cursor - (r * CHURN + i + PF);
                     if (pidx >= 0)
-                        simd_map128_prefetch(&m, klo[pidx], khi[pidx]);
+                        simd_set128_prefetch(&m, klo[pidx], khi[pidx]);
                 }
-                simd_map128_delete(&m, klo[idx], khi[idx]);
+                simd_set128_delete(&m, klo[idx], khi[idx]);
             }
         }
         clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -161,8 +161,8 @@ int main(void) {
         for (int i = 0; i < CHURN; i++) {
             int eidx = ins_cursor + r * CHURN + i;
             if (eidx + PF < extra_n && i + PF < CHURN)
-                simd_map128_prefetch(&m, exlo[eidx + PF], exhi[eidx + PF]);
-            simd_map128_insert(&m, exlo[eidx], exhi[eidx]);
+                simd_set128_prefetch(&m, exlo[eidx + PF], exhi[eidx + PF]);
+            simd_set128_insert(&m, exlo[eidx], exhi[eidx]);
         }
         clock_gettime(CLOCK_MONOTONIC, &t1);
         churn_ins_total += (t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec);
@@ -179,8 +179,8 @@ int main(void) {
     int post_hits = 0;
     for (int i = 0; i < churn_ops; i++) {
         if (i + PF < churn_ops)
-            simd_map128_prefetch(&m, exlo[i + PF], exhi[i + PF]);
-        post_hits += simd_map128_contains(&m, exlo[i], exhi[i]);
+            simd_set128_prefetch(&m, exlo[i + PF], exhi[i + PF]);
+        post_hits += simd_set128_contains(&m, exlo[i], exhi[i]);
     }
     clock_gettime(CLOCK_MONOTONIC, &t1);
     printf("  post-churn hit (PF):       %6.1f ns/op  (found=%d/%d)\n",
@@ -200,21 +200,21 @@ int main(void) {
     clock_gettime(CLOCK_MONOTONIC, &t0);
     for (int i = surviving_start; i < surviving_end; i++) {
         if (i + PF < surviving_end)
-            simd_map128_prefetch(&m, klo[i + PF], khi[i + PF]);
-        simd_map128_delete(&m, klo[i], khi[i]);
+            simd_set128_prefetch(&m, klo[i + PF], khi[i + PF]);
+        simd_set128_delete(&m, klo[i], khi[i]);
     }
     /* Then delete the churn-inserted keys */
     for (int i = 0; i < churn_ops; i++) {
         if (i + PF < churn_ops)
-            simd_map128_prefetch(&m, exlo[i + PF], exhi[i + PF]);
-        simd_map128_delete(&m, exlo[i], exhi[i]);
+            simd_set128_prefetch(&m, exlo[i + PF], exhi[i + PF]);
+        simd_set128_delete(&m, exlo[i], exhi[i]);
     }
     clock_gettime(CLOCK_MONOTONIC, &t1);
     int total_del = surviving_end - surviving_start + churn_ops;
     printf("  delete all (PF):           %6.1f ns/op  (count=%u)\n",
            elapsed_ns(t0, t1, total_del), m.count);
 
-    simd_map128_destroy(&m);
+    simd_set128_destroy(&m);
     free(klo); free(khi);
     free(exlo); free(exhi);
     free(mlo); free(mhi);

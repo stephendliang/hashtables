@@ -1,45 +1,147 @@
 # hmap/ — SIMD hash map library
 
-Header-only C hash sets with AVX-512 and AVX2 backends, designed for
-memory-latency-bound workloads at 100K+ keys. All maps use open addressing
-with group probing, hugepage allocation (2MB), and prefetch pipelining.
+Header-only C hash sets and maps with AVX-512 and AVX2 backends, designed for
+memory-latency-bound workloads at 100K+ keys. All containers use open
+addressing with group probing, hugepage allocation (2MB), and prefetch
+pipelining.
 
-## Hash maps
+## Hash containers
 
-### `simd_map64.h` — uint64_t set, zero metadata
+### `simd_map64.h` — unified uint64_t set/map, superblock layout
+
+Unified set/map header for uint64_t keys. X-include pattern. Set mode when
+`VAL_WORDS` is omitted or 0, map mode when `VAL_WORDS >= 1`:
+
+```c
+// Set mode (simd_set64.h is a thin wrapper for this):
+#define SIMD_MAP_NAME  simd_set64
+#include "simd_map64.h"
+
+// Map mode:
+#define SIMD_MAP_NAME           my_map64
+#define SIMD_MAP64_VAL_WORDS    1
+#define SIMD_MAP64_BLOCK_STRIDE 1   // power of 2, default 1
+#include "simd_map64.h"
+```
 
 Direct-key comparison: keys stored in 8-wide groups (one cache line), SIMD
 compares all 8 at once. Zero false positives, no metadata, no scalar verify.
 Key=0 is reserved (empty sentinel). Delete uses backshift to repair probe
-chains.
+chains (moves values alongside keys in map mode).
+
+Superblock layout (map mode): groups N key cache lines before N value cache
+lines. N=1 degenerates to inline (key + value adjacent, 128B per group for
+VW=1).
 
 - Key: `uint64_t` (0 reserved)
-- Group: 8 slots, 64B (1 cache line)
+- Value: `uint64_t[VAL_WORDS]` (map mode only)
+- Group: 8 key slots (64B) + 8 value slots (8×VW×8B, map mode)
 - Load factor: 75%
 - h2: none (direct compare)
 - Backends: AVX-512 (1 instr/group), AVX2 (5 instr), scalar (portable)
 - Delete: backshift (no tombstones)
 - Probe termination: empty slot
+- Prefetch: `_prefetch()` (key + value lines, read paths),
+  `_prefetch_insert()` (key line only, write paths)
 
-### `simd_map_sentinel.h` — size-agnostic set, sentinel overflow (31 data slots)
+Set API: `_insert(m, key)`, `_contains(m, key)`, `_delete(m, key)`,
+`_op(m, key, op)`, `_prefetch2(m, key)`.
+Map API: `_insert(m, key, val)`, `_get(m, key)` → `uint64_t *`.
 
-Macro-generated via X-include pattern. Supports arbitrary key widths
-(128-bit, 192-bit, 256-bit, etc.) parameterized by word count:
+`simd_set64.h` is a thin `#pragma once` wrapper that defines
+`SIMD_MAP_NAME simd_set64` and includes `simd_map64.h`.
+
+**Block stride result** (2M keys, AVX2, VW=1): **N=1 wins every mixed
+workload** by 6–14% over N=2/4. In true interleaved pipelines, the
+alternating 1-line/2-line prefetch dispatch breaks the hardware
+prefetcher's stride detection for N≥2. N=2/4 only win pure insert-only
+(24% faster). Default: N=1, PF=24. See `KV64_LAYOUT_ANALYSIS.md`.
+
+### `simd_map48_packed.h` — direct-compare 48-bit set, packed 3×u16 (10 keys/CL)
+
+10 keys in a single 64B cache line using packed 3×uint16 interleaved layout.
+Direct SIMD comparison via broadcast+coalesce+PEXT — no metadata filtering.
 
 ```c
-#define SIMD_MAP_NAME  simd_map256
-#define SIMD_MAP_WORDS 4
-#include "simd_map_sentinel.h"
-// generates: struct simd_map256, simd_map256_init(), simd_map256_insert(), ...
+#define SIMD_MAP_NAME my_set48p
+#include "simd_map48_packed.h"
 ```
 
-Interleaved group layout: 64B metadata + 32×(WORDS×8)B keys per group. SIMD
+Group layout (`uint16_t grp[32]`): ctrl (occupancy + reserved) at [0],
+overflow partitions at [1], 10 keys × 3 words interleaved at [2..31].
+AVX2 match: 3 broadcasts + 6 cmpeq + shift+AND coalesce + PEXT (~31 instr).
+
+- Key: `uint64_t` (lower 48 bits, 0 reserved)
+- Group: 10 data slots, 64B (1 cache line)
+- Load factor: 7/8 (87.5%)
+- h2: none (direct compare, zero false positives)
+- Overflow: 16 partitions in `grp[1]`, `hash.hi & 15`
+- Backends: AVX2 (broadcast+coalesce), scalar (loop)
+- Delete: clear occupancy bit, O(1), no tombstones
+- Probe termination: overflow bit check
+- Prefetch: 1 cache line for both read and write paths
+
+Set API: `_init`, `_init_cap`, `_destroy`, `_insert`, `_insert_unique`,
+`_contains`, `_delete`, `_prefetch`, `_prefetch_insert`.
+
+`simd_set48_packed.h` is a thin `#pragma once` wrapper.
+
+### `simd_map48_split.h` — direct-compare 48-bit set, split hi32+lo16 (10 keys/CL)
+
+10 keys in a single 64B cache line using split layout: `uint32_t hi[10]`
+(key >> 16) + `uint16_t lo[10]` (key & 0xFFFF). SIMD matches hi and lo
+separately then ANDs results.
+
+```c
+#define SIMD_MAP_NAME my_set48s
+#include "simd_map48_split.h"
+```
+
+Group layout (64B): `uint32_t ctrl` at offset 0 (occupancy [9:0] + overflow
+[25:10]), `uint32_t hi[10]` at offset 4, `uint16_t lo[10]` at offset 44.
+AVX2 match: vpcmpeqd on hi[0..7] + scalar [8..9], vpcmpeqw on lo[0..7] +
+scalar [8..9], AND (~14 instr).
+
+- Key: `uint64_t` (lower 48 bits, 0 reserved)
+- Group: 10 data slots, 64B (1 cache line)
+- Load factor: 7/8 (87.5%)
+- h2: none (direct compare, zero false positives)
+- Overflow: 16 partitions in ctrl bits [25:10], `hash.hi & 15`
+- Backends: AVX2 (vpcmpeqd + vpcmpeqw), scalar (loop)
+- Delete: clear occupancy bit, O(1), no tombstones
+- Probe termination: overflow bit check
+- Prefetch: 1 cache line for both read and write paths
+
+Set API: same as packed. `simd_set48_split.h` is a thin `#pragma once` wrapper.
+
+### `simd_sentinel.h` — unified set/map, sentinel overflow (31 data slots)
+
+Unified set/map header. Set mode when `VAL_WORDS` is omitted or 0, map mode
+when `VAL_WORDS >= 1`:
+
+```c
+// Set mode:
+#define SIMD_MAP_NAME       my_set
+#define SIMD_MAP_KEY_WORDS  2
+#include "simd_sentinel.h"
+
+// Map mode:
+#define SIMD_MAP_NAME       my_map
+#define SIMD_MAP_KEY_WORDS  2
+#define SIMD_MAP_VAL_WORDS  1
+#define SIMD_MAP_LAYOUT     1           // 1=inline, 2=separate, 3=hybrid
+#include "simd_sentinel.h"
+```
+
+Interleaved group layout: 64B metadata + 32×(KW×8)B keys per group. SIMD
 operates on 16-bit metadata only; scalar key compare fires only on h2 match.
 Slot 31 is a dedicated overflow sentinel with 16 partition bits. Key width is
 irrelevant to the SIMD hot path. All key parameters are `const uint64_t *`.
 
-- Key: `uint64_t[WORDS]` (any width)
-- Group: 31 data slots + 1 sentinel, `64 + 256×WORDS` bytes
+- Key: `uint64_t[KEY_WORDS]` (any width)
+- Value: `uint64_t[VAL_WORDS]` (map mode only)
+- Group: 31 data slots + 1 sentinel, `64 + 256×KW` bytes (set),
+  `+ 256×VW` bytes (map inline)
 - Load factor: 7/8 (87.5%)
 - h2: 15-bit (1/32768 false positive rate)
 - Overflow: 16 partitions in sentinel slot, `hash.hi & 15`
@@ -50,14 +152,23 @@ irrelevant to the SIMD hot path. All key parameters are `const uint64_t *`.
 - Prefetch: `_prefetch()` (5 cache lines, read paths),
   `_prefetch_insert()` (1 cache line, insert paths)
 
-### `simd_map_bitstealing.h` — size-agnostic set, bit-stealing overflow (32 data slots)
+Set API: `_insert(m, key)`, `_contains(m, key)`, `_delete(m, key)`.
+Map API adds: `_insert(m, key, val)`, `_get(m, key)` → `uint64_t *`.
 
-Same X-include pattern and API as sentinel variant. Overflow info is encoded
-in the data slots themselves instead of a dedicated sentinel, reclaiming all
-32 slots for data.
+Map mode supports three value layout strategies:
+- **Strategy 1 (inline)**: values stored after keys in same group.
+- **Strategy 2 (separate)**: values in a separate flat mmap.
+- **Strategy 3 (hybrid)**: value blocks every N key groups (superblock layout).
 
-- Key: `uint64_t[WORDS]` (any width)
-- Group: 32 data slots, `64 + 256×WORDS` bytes
+### `simd_bitstealing.h` — unified set/map, bit-stealing overflow (32 data slots)
+
+Same unified set/map pattern as sentinel. Overflow info is encoded in the
+data slots themselves instead of a dedicated sentinel, reclaiming all 32
+slots for data.
+
+- Key: `uint64_t[KEY_WORDS]` (any width)
+- Value: `uint64_t[VAL_WORDS]` (map mode only)
+- Group: 32 data slots, `64 + 256×KW` bytes (set)
 - Load factor: 7/8 (87.5%)
 - h2: 11-bit (1/2048 false positive rate)
 - Metadata: `[15] OCC [14:11] overflow (4 bits) [10:0] h2`
@@ -70,40 +181,6 @@ in the data slots themselves instead of a dedicated sentinel, reclaiming all
 - Prefetch: `_prefetch()` (5 cache lines, read paths),
   `_prefetch_insert()` (1 cache line, insert paths)
 
-### `simd_kv_sentinel.h` / `simd_kv_bitstealing.h` — size-agnostic KV maps
-
-Key-value extensions of the set headers. Same X-include pattern with additional
-parameters for value width and layout strategy:
-
-```c
-#define SIMD_MAP_NAME       my_kv
-#define SIMD_MAP_KEY_WORDS  2           // key width in uint64_t
-#define SIMD_MAP_VAL_WORDS  1           // value width in uint64_t
-#define SIMD_KV_LAYOUT      1           // 1=inline, 2=separate, 3=hybrid
-#define SIMD_KV_BLOCK_STRIDE 4          // strategy 3 only, power of 2
-#include "simd_kv_sentinel.h"
-```
-
-Three value layout strategies for benchmarking memory access patterns:
-- **Strategy 1 (inline)**: values stored after keys in same group.
-  Group: `64 + 32*KW*8 + 32*VW*8` bytes.
-- **Strategy 2 (separate)**: values in a separate flat mmap. Key groups
-  unchanged from set mode. Struct gains `val_data` pointer.
-- **Strategy 3 (hybrid)**: value blocks every N key groups (superblock layout).
-  N must be power of 2. N=1 degenerates to strategy 1.
-
-API extends set version: `_insert(m, key, val)`, `_insert_unique(m, key, val)`,
-`_get(m, key)` → `uint64_t *` (NULL on miss), `_contains`, `_delete` unchanged.
-`_prefetch_insert(m, key)` prefetches metadata only (1 cache line) for
-insert/delete paths; `_prefetch(m, key)` prefetches metadata + key data
-(5 cache lines) for read paths.
-
-### `simd_map128_sentinel.h` / `simd_map128_bitstealing.h` — 128-bit prototypes
-
-Original fixed-size implementations. Hardcoded to 128-bit keys with separate
-`klo, khi` arguments. Retained for reference; new code should use the generic
-headers above.
-
 **Bitstealing and sentinel are at performance parity** (~17-18 ns/op pipelined
 at 2M keys on AVX2, i9-12900HK). Bitstealing executes ~12% more instructions
 (extra `vpand` to mask overflow bits before `vpcmpeqw`) but achieves ~8%
@@ -113,14 +190,6 @@ identical (L1d, LLC, dTLB misses). Ghost overflow bits cause no measurable
 degradation after 10 rounds of 200K-key churn. Bitstealing has 32 vs 31 data
 slots per group (~3.2% better capacity) and is correct under all insert/delete
 sequences (ghost overflow bits are monotonically preserved).
-
-**Generic vs prototype assembly parity**: the macro-generated version at
-WORDS=2 produces identical performance to the hand-written 128-bit prototype
-(~17-18 ns/op, within run-to-run noise on all operations). The compiler fully
-unrolls `for (i < WORDS)` loops, optimizes compound literal key arguments to
-register pairs, and emits structurally identical assembly. The only difference
-is the hash chains from `crc32(0, w[0])` instead of `crc32(khi[31:0], klo)`
-— one extra instruction that hides behind memory latency.
 
 ## Shared design patterns
 
@@ -161,32 +230,34 @@ is the hash chains from `crc32(0, w[0])` instead of `crc32(khi[31:0], klo)`
 
 ## File naming convention
 
-`{purpose}_{map}_{topic}.c` where:
+`{purpose}_{type}_{topic}.c` where:
 - `test_` = correctness tests (must exit 0)
 - `bench_` = performance benchmarks (re-runnable, comparable)
 
 ### Correctness tests
 
-| File | Map | What it does |
-|------|-----|-------------|
-| `test_map128.c` | map128 (proto) | 11-test suite: insert, dup, hit, miss, partial, delete-hit, delete-miss, re-insert, delete-all, init_cap, insert_unique |
-| `test_map_generic.c` | generic | Full suite at 128-bit + 256-bit, both sentinel and bitstealing |
-| `test_kv_generic.c` | generic KV | KV correctness: 3 layouts × 2 overflow schemes, insert/get/delete/re-insert with value verification |
+| File | Type | What it does |
+|------|------|-------------|
+| `test_map_generic.c` | generic set | Full suite at 128-bit + 256-bit, both sentinel and bitstealing |
+| `test_kv_generic.c` | generic map | Map correctness: 3 layouts × 2 overflow schemes, insert/get/delete/re-insert with value verification |
+| `test_kv64.c` | map64 | Map64 correctness: N=1,2,4,8 strides, VW=1 and VW=2, insert/get/delete/re-insert with value verification |
+| `test_map48.c` | map48 | Map48 correctness: set + map VW=1,2, insert/dup/contains/delete/re-insert |
+| `test_map48_direct.c` | map48 direct | Packed + split direct-compare 48-bit set correctness (2M keys) |
 
 ### Benchmarks
 
-| File | Map | What it does |
-|------|-----|-------------|
-| `bench_map128_throughput.c` | map128 | Mixed workload: bulk insert, hit/miss, churn rounds, post-churn lookups, delete-all. `-DBITSTEALING` for variant. |
-| `bench_map64_libs.c` | map64 | simd_map64 vs verstable vs khashl (C side). Linked with C++ driver. |
-| `bench_map64_libs_main.cpp` | map64 | C++ driver: adds boost::unordered_flat_set to above comparison. |
-| `bench_map64_backends.c` | map64 | AVX-512 vs AVX2 vs scalar backend comparison + post-churn lookup. Build two binaries: one native, one with `-mno-avx512f`. |
-| `bench_map128_delete.c` | map128 | A/B: rehash vs displacement backshift delete |
-| `bench_map128_delete_pf.c` | map128 | Raw vs prefetch-pipelined delete throughput |
-| `bench_kv_layout.c` | generic KV | Grid search: 3 layouts × 2 overflow × PF sweep. 16 instantiations. TSV output. |
-| `bench_kv_pf_tuning.c` | generic KV | PF distance sweep + delete prefetch mode A/B. Sentinel inline (KW=2, VW=1). TSV output. |
-| `bench_kv_vs_boost.c` | generic KV | KV sentinel/bitstealing vs boost::unordered_flat_map (C side). Linked with C++ driver. |
-| `bench_kv_vs_boost_main.cpp` | generic KV | C++ driver: boost benchmark + orchestration. 10 workloads: insert-only, 5 read/write ratios, 4 churn profiles. TSV output. |
+| File | Type | What it does |
+|------|------|-------------|
+| `bench_map64_libs.c` | set64 | simd_set64 vs verstable vs khashl (C side). Linked with C++ driver. |
+| `bench_map64_libs_main.cpp` | set64 | C++ driver: adds boost::unordered_flat_set to above comparison. |
+| `bench_map64_backends.c` | set64 | AVX-512 vs AVX2 vs scalar backend comparison + post-churn lookup. Build two binaries: one native, one with `-mno-avx512f`. |
+| `bench_kv_layout.c` | generic map | Grid search: 3 layouts × 2 overflow × PF sweep. 16 instantiations. TSV output. |
+| `bench_kv_pf_tuning.c` | generic map | PF distance sweep + delete prefetch mode A/B. Sentinel inline (KW=2, VW=1). TSV output. |
+| `bench_kv64_layout.c` | map64 | 2D grid search: block stride (N=1,2,4) × PF distance (4–64). 7 workloads. TSV output. |
+| `bench_kv_vs_boost.c` | generic map | Map sentinel/bitstealing vs boost::unordered_flat_map (C side). Linked with C++ driver. |
+| `bench_kv_vs_boost_main.cpp` | generic map | C++ driver: boost benchmark + orchestration. 10 workloads: insert-only, 5 read/write ratios, 4 churn profiles. TSV output. |
+| `bench_map48.c` | map48 | map48 vs sentinel(KW=1) vs map64, insert/contains/mixed. |
+| `bench_map48_direct.c` | map48 direct | packed vs split vs map48 vs map64, insert/contains/mixed. |
 
 ### Third-party headers (vendored for benchmarks)
 
@@ -199,13 +270,29 @@ is the hash chains from `crc32(0, w[0])` instead of `crc32(khi[31:0], klo)`
 | File | What it does |
 |------|-------------|
 | `WHY_NOT_PHF.md` | Analysis of why perfect hash maps lose to open addressing at scale |
-| `KV_LAYOUT_ANALYSIS.md` | KV value layout strategy benchmark: inline vs separate vs hybrid, ANOVA analysis across sentinel and bitstealing |
-| `KV_BOOST_COMPARISON.md` | KV map vs boost::unordered_flat_map benchmark: 10 workloads, ANOVA analysis, crossover analysis |
+| `KV_LAYOUT_ANALYSIS.md` | Map value layout strategy benchmark: inline vs separate vs hybrid, ANOVA analysis across sentinel and bitstealing |
+| `KV_BOOST_COMPARISON.md` | Map vs boost::unordered_flat_map benchmark: 10 workloads, ANOVA analysis, crossover analysis |
+| `KV64_LAYOUT_ANALYSIS.md` | Map64 superblock layout benchmark: N=1,2,4 × PF 2D grid, read vs write tradeoff analysis |
 | `analyze_kv_pf_tuning.py` | Tabular analysis of PF tuning TSV runs: median ns/op vs PF, optimal PF, meta vs full pairwise |
+
+### Archive (`archive/`)
+
+128-bit prototype headers and their test/bench consumers. Superseded by the
+generic set headers at `SIMD_SET_WORDS=2` (identical performance, identical
+assembly). Retained for historical reference.
+
+| File | What it does |
+|------|-------------|
+| `simd_set128_sentinel.h` | 128-bit prototype set, sentinel overflow, `(klo, khi)` API |
+| `simd_set128_bitstealing.h` | 128-bit prototype set, bit-stealing overflow, `(klo, khi)` API |
+| `test_map128.c` | 11-test correctness suite for prototype |
+| `bench_map128_throughput.c` | Mixed workload benchmark, `-DBITSTEALING` for variant |
+| `bench_map128_delete.c` | A/B: rehash vs backshift delete |
+| `bench_map128_delete_pf.c` | Raw vs prefetch-pipelined delete throughput |
 
 ## Performance characteristics (2M keys, AVX2, i9-12900HK)
 
-Both 128-bit variants achieve ~17-18 ns/op pipelined (PF=24) across all
+Both 128-bit set variants achieve ~17-18 ns/op pipelined (PF=24) across all
 operations (insert, contains-hit, contains-miss, delete, churn). The
 bottleneck is memory latency, not compute:
 
@@ -223,43 +310,46 @@ hit. Prefetch hides this latency PF=24 iterations ahead.
 ## Build
 
 ```sh
-# generic correctness (128-bit + 256-bit, sentinel + bitstealing)
+# generic set correctness (128-bit + 256-bit, sentinel + bitstealing)
 cc -O3 -march=native -std=gnu11 -o test_generic test_map_generic.c
 
-# generic scalar backend
+# generic set scalar backend
 cc -O3 -march=native -mno-avx2 -mno-avx512f -std=gnu11 -o test_generic_scalar test_map_generic.c
 
-# 128-bit prototype correctness (sentinel)
-cc -O3 -march=native -std=gnu11 -o test_s test_map128.c
-
-# 128-bit prototype correctness (bitstealing)
-sed 's|simd_map128_sentinel\.h|simd_map128_bitstealing.h|' test_map128.c | \
-  cc -O3 -march=native -std=gnu11 -x c -o test_bs -
-
-# throughput benchmark (sentinel vs bitstealing)
-cc -O3 -march=native -std=gnu11 -o bench_s bench_map128_throughput.c
-cc -O3 -march=native -std=gnu11 -DBITSTEALING -o bench_bs bench_map128_throughput.c
-
-# map64 backend comparison (AVX-512 vs AVX2)
+# set64 backend comparison (AVX-512 vs AVX2)
 cc -O3 -march=native -std=gnu11 -o bench_512 bench_map64_backends.c
 cc -O3 -march=native -mno-avx512f -std=gnu11 -o bench_avx2 bench_map64_backends.c
 
-# 128-bit scalar backend (SWAR, still uses CRC32 hash via SSE4.2)
-cc -O3 -march=native -mno-avx2 -mno-avx512f -std=gnu11 -o test_scalar test_map128.c
+# map64 correctness (N=1,2,4,8, VW=1 and VW=2)
+cc -O3 -march=native -std=gnu11 -o test_kv64 test_kv64.c
 
-# KV map correctness (all 6 variants: 3 layouts × 2 overflow)
+# map64 scalar backend correctness
+cc -O3 -march=native -mno-avx2 -mno-avx512f -std=gnu11 -o test_kv64_scalar test_kv64.c
+
+# generic map correctness (all 6 variants: 3 layouts × 2 overflow)
 cc -O3 -march=native -std=gnu11 -o test_kv test_kv_generic.c
 
-# KV map scalar backend correctness
+# generic map scalar backend correctness
 cc -O3 -march=native -mno-avx2 -mno-avx512f -std=gnu11 -o test_kv_scalar test_kv_generic.c
 
-# KV layout benchmark (16 instantiations, PF sweep, churn)
+# map64 layout benchmark (N=1,2,4 × PF 2D grid)
+cc -O3 -march=native -std=gnu11 -o bench_kv64 bench_kv64_layout.c
+
+# generic map layout benchmark (16 instantiations, PF sweep, churn)
 cc -O3 -march=native -std=gnu11 -o bench_kv bench_kv_layout.c
 
-# KV PF tuning (PF sweep + delete prefetch A/B)
+# generic map PF tuning (PF sweep + delete prefetch A/B)
 cc -O3 -march=native -std=gnu11 -o bench_pf bench_kv_pf_tuning.c
 
-# KV vs boost::unordered_flat_map (C/C++ linkage)
+# map48 correctness (sentinel + direct-compare packed/split)
+cc -O3 -march=native -std=gnu11 -o test_map48 test_map48.c
+cc -O3 -march=native -std=gnu11 -o test_map48_direct test_map48_direct.c
+cc -O3 -march=native -mno-avx2 -mno-avx512f -std=gnu11 -o test_map48_direct_scalar test_map48_direct.c
+
+# map48 direct-compare benchmark (packed vs split vs map48 vs map64)
+cc -O3 -march=native -std=gnu11 -o bench_map48_direct bench_map48_direct.c
+
+# generic map vs boost::unordered_flat_map (C/C++ linkage)
 cc -O3 -march=native -std=gnu11 -c bench_kv_vs_boost.c
 c++ -O3 -march=native -std=c++17 -c bench_kv_vs_boost_main.cpp
 c++ -O3 -o bench_kv_vs_boost bench_kv_vs_boost.o bench_kv_vs_boost_main.o

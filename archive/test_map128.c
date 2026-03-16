@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <time.h>
-#include "simd_map128_sentinel.h"
+#include "simd_set128_sentinel.h"
 
 #define N 2000000
 
@@ -13,8 +13,8 @@ static inline uint64_t splitmix64(uint64_t *state) {
 }
 
 int main(void) {
-    struct simd_map128 m;
-    simd_map128_init(&m);
+    struct simd_set128 m;
+    simd_set128_init(&m);
 
     /* Generate N distinct 128-bit keys from two independent PRNG streams */
     uint64_t seed_lo = 0xdeadbeefcafe1234ULL;
@@ -30,7 +30,7 @@ int main(void) {
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     for (int i = 0; i < N; i++) {
-        int r = simd_map128_insert(&m, keys_lo[i], keys_hi[i]);
+        int r = simd_set128_insert(&m, keys_lo[i], keys_hi[i]);
         if (r != 1) {
             printf("FAIL: insert(%d) returned %d, expected 1\n", i, r);
             return 1;
@@ -42,7 +42,7 @@ int main(void) {
     /* Duplicate rejection */
     int dup_ok = 1;
     for (int i = 0; i < 1000; i++) {
-        if (simd_map128_insert(&m, keys_lo[i], keys_hi[i]) != 0) {
+        if (simd_set128_insert(&m, keys_lo[i], keys_hi[i]) != 0) {
             printf("FAIL: duplicate insert(%d) returned 1\n", i);
             dup_ok = 0;
         }
@@ -52,7 +52,7 @@ int main(void) {
     clock_gettime(CLOCK_MONOTONIC, &t0);
     int miss = 0;
     for (int i = 0; i < N; i++) {
-        if (!simd_map128_contains(&m, keys_lo[i], keys_hi[i]))
+        if (!simd_set128_contains(&m, keys_lo[i], keys_hi[i]))
             miss++;
     }
     clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -65,20 +65,20 @@ int main(void) {
     for (int i = 0; i < N; i++) {
         uint64_t mlo = splitmix64(&miss_seed_lo);
         uint64_t mhi = splitmix64(&miss_seed_hi);
-        if (simd_map128_contains(&m, mlo, mhi))
+        if (simd_set128_contains(&m, mlo, mhi))
             false_pos++;
     }
 
     /* Partial key mismatch: same lo different hi, same hi different lo */
     int partial_fp = 0;
     for (int i = 0; i < 1000; i++) {
-        if (simd_map128_contains(&m, keys_lo[i], keys_hi[i] ^ 1))
+        if (simd_set128_contains(&m, keys_lo[i], keys_hi[i] ^ 1))
             partial_fp++;
-        if (simd_map128_contains(&m, keys_lo[i] ^ 1, keys_hi[i]))
+        if (simd_set128_contains(&m, keys_lo[i] ^ 1, keys_hi[i]))
             partial_fp++;
     }
 
-    printf("simd_map128 correctness (N=%d):\n", N);
+    printf("simd_set128 correctness (N=%d):\n", N);
     printf("  insert:       %s\n", (m.count == N) ? "PASS" : "FAIL");
     printf("  duplicates:   %s\n", dup_ok ? "PASS" : "FAIL");
     printf("  contains hit: %s (miss=%d)\n", miss == 0 ? "PASS" : "FAIL", miss);
@@ -92,19 +92,19 @@ int main(void) {
     /* --- Delete hit: delete first N/2, verify misses, verify remainder --- */
     int del_hit_ok = 1;
     for (int i = 0; i < N / 2; i++) {
-        int r = simd_map128_delete(&m, keys_lo[i], keys_hi[i]);
+        int r = simd_set128_delete(&m, keys_lo[i], keys_hi[i]);
         if (r != 1) { del_hit_ok = 0; break; }
     }
     if (m.count != (uint32_t)(N - N / 2)) del_hit_ok = 0;
     /* deleted keys must miss */
     for (int i = 0; i < N / 2; i++) {
-        if (simd_map128_contains(&m, keys_lo[i], keys_hi[i])) {
+        if (simd_set128_contains(&m, keys_lo[i], keys_hi[i])) {
             del_hit_ok = 0; break;
         }
     }
     /* remaining keys must still hit */
     for (int i = N / 2; i < N; i++) {
-        if (!simd_map128_contains(&m, keys_lo[i], keys_hi[i])) {
+        if (!simd_set128_contains(&m, keys_lo[i], keys_hi[i])) {
             del_hit_ok = 0; break;
         }
     }
@@ -119,7 +119,7 @@ int main(void) {
     for (int i = 0; i < 1000; i++) {
         uint64_t mlo = splitmix64(&dm_seed_lo);
         uint64_t mhi = splitmix64(&dm_seed_hi);
-        if (simd_map128_delete(&m, mlo, mhi) != 0) {
+        if (simd_set128_delete(&m, mlo, mhi) != 0) {
             del_miss_ok = 0; break;
         }
     }
@@ -129,11 +129,11 @@ int main(void) {
     /* --- Re-insert after delete: deleted slots are reusable --- */
     int reins_ok = 1;
     for (int i = 0; i < N / 2; i++) {
-        int r = simd_map128_insert(&m, keys_lo[i], keys_hi[i]);
+        int r = simd_set128_insert(&m, keys_lo[i], keys_hi[i]);
         if (r != 1) { reins_ok = 0; break; }
     }
     for (int i = 0; i < N / 2; i++) {
-        if (!simd_map128_contains(&m, keys_lo[i], keys_hi[i])) {
+        if (!simd_set128_contains(&m, keys_lo[i], keys_hi[i])) {
             reins_ok = 0; break;
         }
     }
@@ -145,12 +145,12 @@ int main(void) {
     /* --- Delete all: delete every key, verify count==0 and all miss --- */
     int del_all_ok = 1;
     for (int i = 0; i < N; i++) {
-        int r = simd_map128_delete(&m, keys_lo[i], keys_hi[i]);
+        int r = simd_set128_delete(&m, keys_lo[i], keys_hi[i]);
         if (r != 1) { del_all_ok = 0; break; }
     }
     if (m.count != 0) del_all_ok = 0;
     for (int i = 0; i < N; i++) {
-        if (simd_map128_contains(&m, keys_lo[i], keys_hi[i])) {
+        if (simd_set128_contains(&m, keys_lo[i], keys_hi[i])) {
             del_all_ok = 0; break;
         }
     }
@@ -158,23 +158,23 @@ int main(void) {
            del_all_ok ? "PASS" : "FAIL", m.count);
     ok = ok && del_all_ok;
 
-    simd_map128_destroy(&m);
+    simd_set128_destroy(&m);
 
     /* --- init_cap: pre-allocate, insert, verify --- */
-    struct simd_map128 m2;
-    simd_map128_init_cap(&m2, N);
+    struct simd_set128 m2;
+    simd_set128_init_cap(&m2, N);
     int cap_ok = 1;
     /* Must have enough capacity for N keys without grow */
     if (m2.cap == 0 || m2.data == NULL) cap_ok = 0;
     uint32_t cap_before = m2.cap;
     for (int i = 0; i < N; i++)
-        simd_map128_insert(&m2, keys_lo[i], keys_hi[i]);
+        simd_set128_insert(&m2, keys_lo[i], keys_hi[i]);
     /* Cap should not have changed (no grow needed) */
     if (m2.cap != cap_before) cap_ok = 0;
     if (m2.count != (uint32_t)N) cap_ok = 0;
     /* Spot-check containment */
     for (int i = 0; i < 1000; i++) {
-        if (!simd_map128_contains(&m2, keys_lo[i], keys_hi[i])) {
+        if (!simd_set128_contains(&m2, keys_lo[i], keys_hi[i])) {
             cap_ok = 0; break;
         }
     }
@@ -182,24 +182,24 @@ int main(void) {
            cap_ok ? "PASS" : "FAIL",
            m2.cap == cap_before ? "yes" : "NO", m2.count);
     ok = ok && cap_ok;
-    simd_map128_destroy(&m2);
+    simd_set128_destroy(&m2);
 
     /* --- insert_unique: bulk load without dup check --- */
-    struct simd_map128 m3;
-    simd_map128_init_cap(&m3, N);
+    struct simd_set128 m3;
+    simd_set128_init_cap(&m3, N);
     int uniq_ok = 1;
     for (int i = 0; i < N; i++)
-        simd_map128_insert_unique(&m3, keys_lo[i], keys_hi[i]);
+        simd_set128_insert_unique(&m3, keys_lo[i], keys_hi[i]);
     if (m3.count != (uint32_t)N) uniq_ok = 0;
     for (int i = 0; i < 1000; i++) {
-        if (!simd_map128_contains(&m3, keys_lo[i], keys_hi[i])) {
+        if (!simd_set128_contains(&m3, keys_lo[i], keys_hi[i])) {
             uniq_ok = 0; break;
         }
     }
     printf("  insert_unique: %s (count=%u)\n",
            uniq_ok ? "PASS" : "FAIL", m3.count);
     ok = ok && uniq_ok;
-    simd_map128_destroy(&m3);
+    simd_set128_destroy(&m3);
 
     free(keys_lo);
     free(keys_hi);

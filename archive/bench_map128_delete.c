@@ -22,7 +22,7 @@ static inline double elapsed_ns(struct timespec t0, struct timespec t1) {
 }
 
 /* Pull in the variant selected at compile time */
-#include "simd_map128_sentinel.h"
+#include "simd_set128_sentinel.h"
 
 #define N       2000000
 #define WARMUP  200000
@@ -55,28 +55,28 @@ static void gen_keys(void) {
 static double bench_insert(void) {
     double best = 1e18;
     for (int it = 0; it < ITERS; it++) {
-        struct simd_map128 m;
-        simd_map128_init(&m);
+        struct simd_set128 m;
+        simd_set128_init(&m);
         struct timespec t0, t1;
         clock_gettime(CLOCK_MONOTONIC, &t0);
         for (int i = 0; i < N; i++)
-            simd_map128_insert(&m, keys_lo[i], keys_hi[i]);
+            simd_set128_insert(&m, keys_lo[i], keys_hi[i]);
         clock_gettime(CLOCK_MONOTONIC, &t1);
         double ns = elapsed_ns(t0, t1) / N;
         if (ns < best) best = ns;
-        simd_map128_destroy(&m);
+        simd_set128_destroy(&m);
     }
     return best;
 }
 
-static double bench_contains_hit(struct simd_map128 *m) {
+static double bench_contains_hit(struct simd_set128 *m) {
     double best = 1e18;
     for (int it = 0; it < ITERS; it++) {
         struct timespec t0, t1;
         int sink = 0;
         clock_gettime(CLOCK_MONOTONIC, &t0);
         for (int i = 0; i < N; i++)
-            sink += simd_map128_contains(m, keys_lo[i], keys_hi[i]);
+            sink += simd_set128_contains(m, keys_lo[i], keys_hi[i]);
         clock_gettime(CLOCK_MONOTONIC, &t1);
         double ns = elapsed_ns(t0, t1) / N;
         if (ns < best) best = ns;
@@ -85,14 +85,14 @@ static double bench_contains_hit(struct simd_map128 *m) {
     return best;
 }
 
-static double bench_contains_miss(struct simd_map128 *m) {
+static double bench_contains_miss(struct simd_set128 *m) {
     double best = 1e18;
     for (int it = 0; it < ITERS; it++) {
         struct timespec t0, t1;
         int sink = 0;
         clock_gettime(CLOCK_MONOTONIC, &t0);
         for (int i = 0; i < N; i++)
-            sink += simd_map128_contains(m, miss_lo[i], miss_hi[i]);
+            sink += simd_set128_contains(m, miss_lo[i], miss_hi[i]);
         clock_gettime(CLOCK_MONOTONIC, &t1);
         double ns = elapsed_ns(t0, t1) / N;
         if (ns < best) best = ns;
@@ -105,19 +105,19 @@ static double bench_delete(void) {
     /* insert all, then time deleting all */
     double best = 1e18;
     for (int it = 0; it < ITERS; it++) {
-        struct simd_map128 m;
-        simd_map128_init(&m);
+        struct simd_set128 m;
+        simd_set128_init(&m);
         for (int i = 0; i < N; i++)
-            simd_map128_insert(&m, keys_lo[i], keys_hi[i]);
+            simd_set128_insert(&m, keys_lo[i], keys_hi[i]);
         struct timespec t0, t1;
         clock_gettime(CLOCK_MONOTONIC, &t0);
         for (int i = 0; i < N; i++)
-            simd_map128_delete(&m, keys_lo[i], keys_hi[i]);
+            simd_set128_delete(&m, keys_lo[i], keys_hi[i]);
         clock_gettime(CLOCK_MONOTONIC, &t1);
         double ns = elapsed_ns(t0, t1) / N;
         if (ns < best) best = ns;
         if (m.count != 0) printf("  BUG: count=%u after delete-all\n", m.count);
-        simd_map128_destroy(&m);
+        simd_set128_destroy(&m);
     }
     return best;
 }
@@ -126,10 +126,10 @@ static double bench_churn(void) {
     /* Fill to N, then churn: delete first half, re-insert, repeat */
     double best = 1e18;
     for (int it = 0; it < ITERS; it++) {
-        struct simd_map128 m;
-        simd_map128_init(&m);
+        struct simd_set128 m;
+        simd_set128_init(&m);
         for (int i = 0; i < N; i++)
-            simd_map128_insert(&m, keys_lo[i], keys_hi[i]);
+            simd_set128_insert(&m, keys_lo[i], keys_hi[i]);
 
         int half = N / 2;
         struct timespec t0, t1;
@@ -137,14 +137,14 @@ static double bench_churn(void) {
         /* 3 churn rounds */
         for (int round = 0; round < 3; round++) {
             for (int i = 0; i < half; i++)
-                simd_map128_delete(&m, keys_lo[i], keys_hi[i]);
+                simd_set128_delete(&m, keys_lo[i], keys_hi[i]);
             for (int i = 0; i < half; i++)
-                simd_map128_insert(&m, keys_lo[i], keys_hi[i]);
+                simd_set128_insert(&m, keys_lo[i], keys_hi[i]);
         }
         clock_gettime(CLOCK_MONOTONIC, &t1);
         double ns = elapsed_ns(t0, t1) / (half * 6); /* 6 ops per round × 3 */
         if (ns < best) best = ns;
-        simd_map128_destroy(&m);
+        simd_set128_destroy(&m);
     }
     return best;
 }
@@ -153,39 +153,39 @@ static double bench_delete_contains(void) {
     /* Delete half, then contains-hit on remaining half */
     double best = 1e18;
     for (int it = 0; it < ITERS; it++) {
-        struct simd_map128 m;
-        simd_map128_init(&m);
+        struct simd_set128 m;
+        simd_set128_init(&m);
         for (int i = 0; i < N; i++)
-            simd_map128_insert(&m, keys_lo[i], keys_hi[i]);
+            simd_set128_insert(&m, keys_lo[i], keys_hi[i]);
 
         int half = N / 2;
         struct timespec t0, t1;
         clock_gettime(CLOCK_MONOTONIC, &t0);
         for (int i = 0; i < half; i++)
-            simd_map128_delete(&m, keys_lo[i], keys_hi[i]);
+            simd_set128_delete(&m, keys_lo[i], keys_hi[i]);
         int sink = 0;
         for (int i = half; i < N; i++)
-            sink += simd_map128_contains(&m, keys_lo[i], keys_hi[i]);
+            sink += simd_set128_contains(&m, keys_lo[i], keys_hi[i]);
         clock_gettime(CLOCK_MONOTONIC, &t1);
         double ns = elapsed_ns(t0, t1) / N;
         if (ns < best) best = ns;
-        simd_map128_destroy(&m);
+        simd_set128_destroy(&m);
     }
     return best;
 }
 
 int main(void) {
     gen_keys();
-    printf("=== simd_map128 (N=%d) ===\n", N);
+    printf("=== simd_set128 (N=%d) ===\n", N);
 
     double ins = bench_insert();
     printf("  insert:         %6.1f ns/op\n", ins);
 
     /* build a map for contains benchmarks */
-    struct simd_map128 m;
-    simd_map128_init(&m);
+    struct simd_set128 m;
+    simd_set128_init(&m);
     for (int i = 0; i < N; i++)
-        simd_map128_insert(&m, keys_lo[i], keys_hi[i]);
+        simd_set128_insert(&m, keys_lo[i], keys_hi[i]);
 
     double hit = bench_contains_hit(&m);
     printf("  contains-hit:   %6.1f ns/op\n", hit);
@@ -193,7 +193,7 @@ int main(void) {
     double mis = bench_contains_miss(&m);
     printf("  contains-miss:  %6.1f ns/op\n", mis);
 
-    simd_map128_destroy(&m);
+    simd_set128_destroy(&m);
 
     double del = bench_delete();
     printf("  delete-all:     %6.1f ns/op\n", del);

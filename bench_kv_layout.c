@@ -13,111 +13,111 @@
 #define SIMD_MAP_NAME      s1_sent
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     1
-#include "simd_kv_sentinel.h"
+#define SIMD_MAP_LAYOUT     1
+#include "simd_sentinel.h"
 
 #define SIMD_MAP_NAME      s2_sent
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     2
-#include "simd_kv_sentinel.h"
+#define SIMD_MAP_LAYOUT     2
+#include "simd_sentinel.h"
 
 #define SIMD_MAP_NAME      s3n1_sent
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     3
-#define SIMD_KV_BLOCK_STRIDE 1
-#include "simd_kv_sentinel.h"
+#define SIMD_MAP_LAYOUT     3
+#define SIMD_MAP_BLOCK_STRIDE 1
+#include "simd_sentinel.h"
 
 #define SIMD_MAP_NAME      s3n2_sent
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     3
-#define SIMD_KV_BLOCK_STRIDE 2
-#include "simd_kv_sentinel.h"
+#define SIMD_MAP_LAYOUT     3
+#define SIMD_MAP_BLOCK_STRIDE 2
+#include "simd_sentinel.h"
 
 #define SIMD_MAP_NAME      s3n4_sent
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     3
-#define SIMD_KV_BLOCK_STRIDE 4
-#include "simd_kv_sentinel.h"
+#define SIMD_MAP_LAYOUT     3
+#define SIMD_MAP_BLOCK_STRIDE 4
+#include "simd_sentinel.h"
 
 #define SIMD_MAP_NAME      s3n8_sent
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     3
-#define SIMD_KV_BLOCK_STRIDE 8
-#include "simd_kv_sentinel.h"
+#define SIMD_MAP_LAYOUT     3
+#define SIMD_MAP_BLOCK_STRIDE 8
+#include "simd_sentinel.h"
 
 #define SIMD_MAP_NAME      s3n16_sent
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     3
-#define SIMD_KV_BLOCK_STRIDE 16
-#include "simd_kv_sentinel.h"
+#define SIMD_MAP_LAYOUT     3
+#define SIMD_MAP_BLOCK_STRIDE 16
+#include "simd_sentinel.h"
 
 #define SIMD_MAP_NAME      s3n32_sent
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     3
-#define SIMD_KV_BLOCK_STRIDE 32
-#include "simd_kv_sentinel.h"
+#define SIMD_MAP_LAYOUT     3
+#define SIMD_MAP_BLOCK_STRIDE 32
+#include "simd_sentinel.h"
 
 /* --- Bitstealing instantiations --- */
 #define SIMD_MAP_NAME      s1_bs
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     1
-#include "simd_kv_bitstealing.h"
+#define SIMD_MAP_LAYOUT     1
+#include "simd_bitstealing.h"
 
 #define SIMD_MAP_NAME      s2_bs
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     2
-#include "simd_kv_bitstealing.h"
+#define SIMD_MAP_LAYOUT     2
+#include "simd_bitstealing.h"
 
 #define SIMD_MAP_NAME      s3n1_bs
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     3
-#define SIMD_KV_BLOCK_STRIDE 1
-#include "simd_kv_bitstealing.h"
+#define SIMD_MAP_LAYOUT     3
+#define SIMD_MAP_BLOCK_STRIDE 1
+#include "simd_bitstealing.h"
 
 #define SIMD_MAP_NAME      s3n2_bs
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     3
-#define SIMD_KV_BLOCK_STRIDE 2
-#include "simd_kv_bitstealing.h"
+#define SIMD_MAP_LAYOUT     3
+#define SIMD_MAP_BLOCK_STRIDE 2
+#include "simd_bitstealing.h"
 
 #define SIMD_MAP_NAME      s3n4_bs
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     3
-#define SIMD_KV_BLOCK_STRIDE 4
-#include "simd_kv_bitstealing.h"
+#define SIMD_MAP_LAYOUT     3
+#define SIMD_MAP_BLOCK_STRIDE 4
+#include "simd_bitstealing.h"
 
 #define SIMD_MAP_NAME      s3n8_bs
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     3
-#define SIMD_KV_BLOCK_STRIDE 8
-#include "simd_kv_bitstealing.h"
+#define SIMD_MAP_LAYOUT     3
+#define SIMD_MAP_BLOCK_STRIDE 8
+#include "simd_bitstealing.h"
 
 #define SIMD_MAP_NAME      s3n16_bs
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     3
-#define SIMD_KV_BLOCK_STRIDE 16
-#include "simd_kv_bitstealing.h"
+#define SIMD_MAP_LAYOUT     3
+#define SIMD_MAP_BLOCK_STRIDE 16
+#include "simd_bitstealing.h"
 
 #define SIMD_MAP_NAME      s3n32_bs
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     3
-#define SIMD_KV_BLOCK_STRIDE 32
-#include "simd_kv_bitstealing.h"
+#define SIMD_MAP_LAYOUT     3
+#define SIMD_MAP_BLOCK_STRIDE 32
+#include "simd_bitstealing.h"
 
 #include <stdio.h>
 #include <time.h>

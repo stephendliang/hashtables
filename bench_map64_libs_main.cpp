@@ -129,7 +129,7 @@ int main(int argc, char **argv) {
     bench_result r_khashl = bench_khashl(k_ins, k_pos, k_mix, n_ops);
 
     printf("                insert          lookup+         lookup±\n");
-    print_row("simd_map64",  &r_sm64);
+    print_row("simd_set64",  &r_sm64);
     print_row("verstable",   &r_vt);
     print_row("boost",       &r_boost);
     print_row("khashl",      &r_khashl);
@@ -152,7 +152,7 @@ int main(int argc, char **argv) {
     bench_del_result r_del = bench_sm64_del(N, n_ops, zipf_s,
                                               profiles[0].lkp, profiles[0].ins,
                                               profiles[0].del);
-    printf("\n  simd_map64 delete:  %6.1f Mops/s  (pool=%lu)\n",
+    printf("\n  simd_set64 delete:  %6.1f Mops/s  (pool=%lu)\n",
            r_del.del_mops, (unsigned long)r_del.pool_size);
     printf("  mixed workloads (z=%.1f):\n", zipf_s);
     printf("    %-12s %d/%d/%d:  %6.1f Mops/s   verify: %s\n",

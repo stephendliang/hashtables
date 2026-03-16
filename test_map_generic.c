@@ -3,22 +3,22 @@
 #include <stdlib.h>
 
 /* Instantiate sentinel at 128-bit and 256-bit */
-#define SIMD_MAP_NAME simd_map128s
-#define SIMD_MAP_WORDS 2
-#include "simd_map_sentinel.h"
+#define SIMD_MAP_NAME simd_set128s
+#define SIMD_MAP_KEY_WORDS 2
+#include "simd_sentinel.h"
 
-#define SIMD_MAP_NAME simd_map256s
-#define SIMD_MAP_WORDS 4
-#include "simd_map_sentinel.h"
+#define SIMD_MAP_NAME simd_set256s
+#define SIMD_MAP_KEY_WORDS 4
+#include "simd_sentinel.h"
 
 /* Instantiate bitstealing at 128-bit and 256-bit */
-#define SIMD_MAP_NAME simd_map128b
-#define SIMD_MAP_WORDS 2
-#include "simd_map_bitstealing.h"
+#define SIMD_MAP_NAME simd_set128b
+#define SIMD_MAP_KEY_WORDS 2
+#include "simd_bitstealing.h"
 
-#define SIMD_MAP_NAME simd_map256b
-#define SIMD_MAP_WORDS 4
-#include "simd_map_bitstealing.h"
+#define SIMD_MAP_NAME simd_set256b
+#define SIMD_MAP_KEY_WORDS 4
+#include "simd_bitstealing.h"
 
 #define N 2000000
 
@@ -29,7 +29,7 @@ static inline uint64_t splitmix64(uint64_t *state) {
     return z ^ (z >> 31);
 }
 
-/* Run the full test suite for a given map instantiation.
+/* Run the full test suite for a given set instantiation.
  * WORDS = number of uint64_t per key. */
 #define TEST(NAME, WORDS) do {                                              \
     struct NAME m;                                                          \
@@ -141,11 +141,11 @@ int main(void) {
         miss[i] = splitmix64(&mseed);
 
     int all_ok = 1;
-    printf("generic map correctness (N=%d):\n", N);
-    TEST(simd_map128s, 2);
-    TEST(simd_map256s, 4);
-    TEST(simd_map128b, 2);
-    TEST(simd_map256b, 4);
+    printf("generic set correctness (N=%d):\n", N);
+    TEST(simd_set128s, 2);
+    TEST(simd_set256s, 4);
+    TEST(simd_set128b, 2);
+    TEST(simd_set256b, 4);
 
     free(keys);
     free(miss);

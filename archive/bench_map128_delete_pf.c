@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <time.h>
-#include "simd_map128_sentinel.h"
+#include "simd_set128_sentinel.h"
 
 #define N       2000000
 #define PF      8
@@ -21,10 +21,10 @@ static inline uint64_t splitmix64(uint64_t *state) {
 
 static uint64_t *klo, *khi;
 
-static void fill(struct simd_map128 *m) {
-    simd_map128_init(m);
+static void fill(struct simd_set128 *m) {
+    simd_set128_init(m);
     for (int i = 0; i < N; i++)
-        simd_map128_insert(m, klo[i], khi[i]);
+        simd_set128_insert(m, klo[i], khi[i]);
 }
 
 int main(void) {
@@ -39,58 +39,58 @@ int main(void) {
     /* --- Raw delete (no prefetch) --- */
     double best_raw = 1e18;
     for (int it = 0; it < ITERS; it++) {
-        struct simd_map128 m;
+        struct simd_set128 m;
         fill(&m);
         struct timespec t0, t1;
         clock_gettime(CLOCK_MONOTONIC, &t0);
         for (int i = 0; i < N; i++)
-            simd_map128_delete(&m, klo[i], khi[i]);
+            simd_set128_delete(&m, klo[i], khi[i]);
         clock_gettime(CLOCK_MONOTONIC, &t1);
         double ns = ((t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec)) / N;
         if (ns < best_raw) best_raw = ns;
-        simd_map128_destroy(&m);
+        simd_set128_destroy(&m);
     }
 
     /* --- Prefetch-pipelined delete --- */
     double best_pf = 1e18;
     for (int it = 0; it < ITERS; it++) {
-        struct simd_map128 m;
+        struct simd_set128 m;
         fill(&m);
         struct timespec t0, t1;
         clock_gettime(CLOCK_MONOTONIC, &t0);
         /* prime the pipeline */
         for (int i = 0; i < PF && i < N; i++)
-            simd_map128_prefetch(&m, klo[i], khi[i]);
+            simd_set128_prefetch(&m, klo[i], khi[i]);
         for (int i = 0; i < N; i++) {
             if (i + PF < N)
-                simd_map128_prefetch(&m, klo[i + PF], khi[i + PF]);
-            simd_map128_delete(&m, klo[i], khi[i]);
+                simd_set128_prefetch(&m, klo[i + PF], khi[i + PF]);
+            simd_set128_delete(&m, klo[i], khi[i]);
         }
         clock_gettime(CLOCK_MONOTONIC, &t1);
         double ns = ((t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec)) / N;
         if (ns < best_pf) best_pf = ns;
-        simd_map128_destroy(&m);
+        simd_set128_destroy(&m);
     }
 
     /* --- Prefetch-pipelined contains-hit (reference) --- */
     double best_ch = 1e18;
     for (int it = 0; it < ITERS; it++) {
-        struct simd_map128 m;
+        struct simd_set128 m;
         fill(&m);
         struct timespec t0, t1;
         int sink = 0;
         clock_gettime(CLOCK_MONOTONIC, &t0);
         for (int i = 0; i < PF && i < N; i++)
-            simd_map128_prefetch(&m, klo[i], khi[i]);
+            simd_set128_prefetch(&m, klo[i], khi[i]);
         for (int i = 0; i < N; i++) {
             if (i + PF < N)
-                simd_map128_prefetch(&m, klo[i + PF], khi[i + PF]);
-            sink += simd_map128_contains(&m, klo[i], khi[i]);
+                simd_set128_prefetch(&m, klo[i + PF], khi[i + PF]);
+            sink += simd_set128_contains(&m, klo[i], khi[i]);
         }
         clock_gettime(CLOCK_MONOTONIC, &t1);
         double ns = ((t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec)) / N;
         if (ns < best_ch) best_ch = ns;
-        simd_map128_destroy(&m);
+        simd_set128_destroy(&m);
     }
 
     printf("delete raw:          %6.1f ns/op\n", best_raw);

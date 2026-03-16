@@ -2,7 +2,7 @@
 
 This directory previously contained `simd_phf64.h`, a "perfect" hash set that
 guaranteed worst-case O(1) lookup with no probing. It was removed because it
-consistently lost to the regular `simd_map64.h` in benchmarks. This file
+consistently lost to the regular `simd_set64.h` in benchmarks. This file
 explains why.
 
 ## The idea

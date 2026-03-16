@@ -1,8 +1,8 @@
 /*
- * bench_backend.c — AVX2 vs AVX-512 backend comparison for simd_map64
+ * bench_backend.c — AVX2 vs AVX-512 backend comparison for simd_set64
  *
  * Self-contained: same PRNG, Zipf sampler, and workloads as test_hashmap.c
- * but depends only on simd_map64.h (no boost, no C++).
+ * but depends only on simd_set64.h (no boost, no C++).
  *
  * Build two binaries from the same source:
  *   make bench_512    (AVX-512 backend)
@@ -11,7 +11,7 @@
  *
  * Usage: ./bench_512 [N] [n_ops] [zipf_s]
  */
-#include "simd_map64.h"
+#include "simd_set64.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -159,14 +159,14 @@ static inline double now_sec(void) {
 
 static void bench_core(const uint64_t *k_ins, const uint64_t *k_pos,
                        const uint64_t *k_mix, uint64_t n_ops) {
-    struct simd_map64 m;
-    simd_map64_init(&m);
+    struct simd_set64 m;
+    simd_set64_init(&m);
 
     /* insert */
     uint64_t dups = 0;
     double t0 = now_sec();
     for (uint64_t i = 0; i < n_ops; i++) {
-        if (simd_map64_insert(&m, k_ins[i]) == 0)
+        if (simd_set64_insert(&m, k_ins[i]) == 0)
             dups++;
     }
     double elapsed = now_sec() - t0;
@@ -177,8 +177,8 @@ static void bench_core(const uint64_t *k_ins, const uint64_t *k_pos,
     volatile int sink = 0;
     for (uint64_t i = 0; i < n_ops; i++) {
         if (i + PF_DIST < n_ops)
-            simd_map64_prefetch(&m, k_pos[i + PF_DIST]);
-        sink += simd_map64_contains(&m, k_pos[i]);
+            simd_set64_prefetch(&m, k_pos[i + PF_DIST]);
+        sink += simd_set64_contains(&m, k_pos[i]);
     }
     elapsed = now_sec() - t0;
     double pos_mops = (double)n_ops / elapsed / 1e6;
@@ -188,8 +188,8 @@ static void bench_core(const uint64_t *k_ins, const uint64_t *k_pos,
     t0 = now_sec();
     for (uint64_t i = 0; i < n_ops; i++) {
         if (i + PF_DIST < n_ops)
-            simd_map64_prefetch(&m, k_mix[i + PF_DIST]);
-        if (simd_map64_contains(&m, k_mix[i]))
+            simd_set64_prefetch(&m, k_mix[i + PF_DIST]);
+        if (simd_set64_contains(&m, k_mix[i]))
             hits++;
     }
     elapsed = now_sec() - t0;
@@ -202,7 +202,7 @@ static void bench_core(const uint64_t *k_ins, const uint64_t *k_pos,
     printf("  lookup±:  %6.1f Mops/s  (%.1f%% hit)\n",
            mix_mops, 100.0 * (double)hits / (double)n_ops);
 
-    simd_map64_destroy(&m);
+    simd_set64_destroy(&m);
 }
 
 /* ================================================================
@@ -219,13 +219,13 @@ static void bench_del_mixed(uint64_t pool_size, uint64_t n_mixed_ops,
 
     /* generate pool of unique non-zero keys */
     uint64_t *pool = (uint64_t *)hp_alloc(pool_size * sizeof(uint64_t));
-    struct simd_map64 m;
-    simd_map64_init(&m);
+    struct simd_set64 m;
+    simd_set64_init(&m);
 
     uint64_t gen = 0;
     while (gen < pool_size) {
         uint64_t k = xoshiro256ss() | 1;
-        if (simd_map64_insert(&m, k))
+        if (simd_set64_insert(&m, k))
             pool[gen++] = k;
     }
 
@@ -241,8 +241,8 @@ static void bench_del_mixed(uint64_t pool_size, uint64_t n_mixed_ops,
         double t0 = now_sec();
         for (uint64_t i = 0; i < pool_size; i++) {
             if (i + PF_DIST < pool_size)
-                simd_map64_prefetch2(&m, pool[i + PF_DIST]);
-            tot += (uint64_t)simd_map64_delete(&m, pool[i]);
+                simd_set64_prefetch2(&m, pool[i + PF_DIST]);
+            tot += (uint64_t)simd_set64_delete(&m, pool[i]);
         }
         double elapsed = now_sec() - t0;
         printf("  delete:   %6.1f Mops/s  (pool=%lu)\n",
@@ -252,17 +252,17 @@ static void bench_del_mixed(uint64_t pool_size, uint64_t n_mixed_ops,
             fprintf(stderr, "  FAIL: delete-all count=%u deleted=%lu\n",
                     m.count, (unsigned long)tot);
         }
-        simd_map64_destroy(&m);
+        simd_set64_destroy(&m);
     } else {
-        simd_map64_destroy(&m);
+        simd_set64_destroy(&m);
     }
 
     /* mixed workload */
-    simd_map64_init(&m);
+    simd_set64_init(&m);
     uint32_t live  = (uint32_t)(pool_size / 2);
     uint32_t total = (uint32_t)pool_size;
     for (uint32_t i = 0; i < live; i++)
-        simd_map64_insert(&m, pool[i]);
+        simd_set64_insert(&m, pool[i]);
 
     zipf_setup(live, zipf_s);
 
@@ -307,8 +307,8 @@ static void bench_del_mixed(uint64_t pool_size, uint64_t n_mixed_ops,
     double t0 = now_sec();
     for (uint64_t i = 0; i < n_mixed_ops; i++) {
         if (i + PF_DIST_MIX < n_mixed_ops)
-            simd_map64_prefetch2(&m, op_keys[i + PF_DIST_MIX]);
-        tot += (uint64_t)simd_map64_op(&m, op_keys[i], op_type[i]);
+            simd_set64_prefetch2(&m, op_keys[i + PF_DIST_MIX]);
+        tot += (uint64_t)simd_set64_op(&m, op_keys[i], op_type[i]);
     }
     double elapsed = now_sec() - t0;
     double mixed_mops = (double)n_mixed_ops / elapsed / 1e6;
@@ -321,7 +321,7 @@ static void bench_del_mixed(uint64_t pool_size, uint64_t n_mixed_ops,
     }
     if (ok) {
         for (uint32_t i = 0; i < live; i++) {
-            if (!simd_map64_contains(&m, pool[i])) {
+            if (!simd_set64_contains(&m, pool[i])) {
                 fprintf(stderr, "  FAIL: %s live pool[%u] missing\n", label, i);
                 ok = 0;
                 break;
@@ -330,7 +330,7 @@ static void bench_del_mixed(uint64_t pool_size, uint64_t n_mixed_ops,
     }
     if (ok && total > live) {
         for (uint32_t i = live; i < total; i++) {
-            if (simd_map64_contains(&m, pool[i])) {
+            if (simd_set64_contains(&m, pool[i])) {
                 fprintf(stderr, "  FAIL: %s dead pool[%u] found\n", label, i);
                 ok = 0;
                 break;
@@ -348,8 +348,8 @@ static void bench_del_mixed(uint64_t pool_size, uint64_t n_mixed_ops,
     t0 = now_sec();
     for (uint64_t i = 0; i < live; i++) {
         if (i + PF_DIST < live)
-            simd_map64_prefetch(&m, pool[i + PF_DIST]);
-        simd_map64_contains(&m, pool[i]);
+            simd_set64_prefetch(&m, pool[i + PF_DIST]);
+        simd_set64_contains(&m, pool[i]);
     }
     elapsed = now_sec() - t0;
     double pc_hit = live > 0 ? (double)live / elapsed / 1e6 : 0;
@@ -358,8 +358,8 @@ static void bench_del_mixed(uint64_t pool_size, uint64_t n_mixed_ops,
     t0 = now_sec();
     for (uint32_t i = live; i < total; i++) {
         if (i + PF_DIST < total)
-            simd_map64_prefetch(&m, pool[i + PF_DIST]);
-        simd_map64_contains(&m, pool[i]);
+            simd_set64_prefetch(&m, pool[i + PF_DIST]);
+        simd_set64_contains(&m, pool[i]);
     }
     elapsed = now_sec() - t0;
     double pc_miss = dead > 0 ? (double)dead / elapsed / 1e6 : 0;
@@ -369,7 +369,7 @@ static void bench_del_mixed(uint64_t pool_size, uint64_t n_mixed_ops,
 
     hp_free(op_keys, n_mixed_ops * sizeof(uint64_t));
     hp_free(op_type, n_mixed_ops);
-    simd_map64_destroy(&m);
+    simd_set64_destroy(&m);
     hp_free(pool, pool_size * sizeof(uint64_t));
 }
 
@@ -386,7 +386,7 @@ int main(int argc, char **argv) {
     if (argc > 2) n_ops = (uint64_t)atol(argv[2]);
     if (argc > 3) zipf_s = atof(argv[3]);
 
-    printf("simd_map64 backend: %s\n", BACKEND_NAME);
+    printf("simd_set64 backend: %s\n", BACKEND_NAME);
     printf("N=%lu  ops=%lu  zipf_s=%.2f\n\n",
            (unsigned long)N, (unsigned long)n_ops, zipf_s);
 

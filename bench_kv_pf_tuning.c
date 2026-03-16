@@ -15,8 +15,8 @@
 #define SIMD_MAP_NAME      pf_sent
 #define SIMD_MAP_KEY_WORDS 2
 #define SIMD_MAP_VAL_WORDS 1
-#define SIMD_KV_LAYOUT     1
-#include "simd_kv_sentinel.h"
+#define SIMD_MAP_LAYOUT     1
+#include "simd_sentinel.h"
 
 #include <stdio.h>
 #include <stdlib.h>

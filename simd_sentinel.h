@@ -1,46 +1,52 @@
 /*
- * simd_kv_sentinel.h — size-agnostic SIMD hash map (KV) with overflow sentinel
+ * simd_sentinel.h — unified SIMD hash set/map with overflow sentinel
  *
- * Macro-generated via X-include pattern. Define parameters before including:
+ * Set mode (VAL_WORDS omitted or 0):
+ *   #define SIMD_MAP_NAME  my_set
+ *   #define SIMD_MAP_KEY_WORDS 2
+ *   #include "simd_sentinel.h"
  *
- *   #define SIMD_MAP_NAME       my_kv
+ * Map mode (VAL_WORDS >= 1):
+ *   #define SIMD_MAP_NAME       my_map
  *   #define SIMD_MAP_KEY_WORDS  2
  *   #define SIMD_MAP_VAL_WORDS  1
- *   #define SIMD_KV_LAYOUT      1   // 1=inline, 2=separate, 3=hybrid
- *   #define SIMD_KV_BLOCK_STRIDE 4  // strategy 3 only, power of 2
- *   #include "simd_kv_sentinel.h"
+ *   #define SIMD_MAP_LAYOUT     1
+ *   #include "simd_sentinel.h"
  *
- * Key: uint64_t[KEY_WORDS]. Value: uint64_t[VAL_WORDS].
+ * Key: uint64_t[KEY_WORDS]. Value: uint64_t[VAL_WORDS] (map mode only).
  * All key/value parameters are const uint64_t *.
  * Can be included multiple times with different parameters.
  *
  * 31 data slots + 1 overflow sentinel per group. 15-bit h2.
- * Layout strategies: 1=inline values in group, 2=separate flat array,
- * 3=hybrid (value blocks every BLOCK_STRIDE key groups).
+ * Layout strategies (map mode): 1=inline values in group, 2=separate flat
+ * array, 3=hybrid (value blocks every BLOCK_STRIDE key groups).
  */
 
 #ifndef SIMD_MAP_NAME
-#error "Define SIMD_MAP_NAME before including simd_kv_sentinel.h"
+#error "Define SIMD_MAP_NAME before including simd_sentinel.h"
 #endif
 #ifndef SIMD_MAP_KEY_WORDS
-#error "Define SIMD_MAP_KEY_WORDS before including simd_kv_sentinel.h"
+#error "Define SIMD_MAP_KEY_WORDS before including simd_sentinel.h"
 #endif
+
+/* Default VAL_WORDS to 0 (set mode) */
 #ifndef SIMD_MAP_VAL_WORDS
-#error "Define SIMD_MAP_VAL_WORDS before including simd_kv_sentinel.h"
+#define SIMD_MAP_VAL_WORDS 0
 #endif
-#if SIMD_MAP_VAL_WORDS < 1
-#error "SIMD_MAP_VAL_WORDS must be >= 1"
-#endif
-#ifndef SIMD_KV_LAYOUT
-#error "Define SIMD_KV_LAYOUT (1, 2, or 3) before including simd_kv_sentinel.h"
-#endif
-#if SIMD_KV_LAYOUT == 3 && !defined(SIMD_KV_BLOCK_STRIDE)
-#error "Strategy 3 requires SIMD_KV_BLOCK_STRIDE (power of 2)"
+
+/* Validate map-mode requirements */
+#if SIMD_MAP_VAL_WORDS > 0
+  #ifndef SIMD_MAP_LAYOUT
+  #error "Map mode (VAL_WORDS >= 1) requires SIMD_MAP_LAYOUT (1, 2, or 3)"
+  #endif
+  #if SIMD_MAP_LAYOUT == 3 && !defined(SIMD_MAP_BLOCK_STRIDE)
+  #error "Strategy 3 requires SIMD_MAP_BLOCK_STRIDE (power of 2)"
+  #endif
 #endif
 
 /* --- Common (once) --- */
-#ifndef SIMD_MAP_COMMON_H_
-#define SIMD_MAP_COMMON_H_
+#ifndef SIMD_SENTINEL_COMMON_H_
+#define SIMD_SENTINEL_COMMON_H_
 #if defined(__AVX512F__) || defined(__AVX2__) || defined(__SSE4_2__)
 #include <immintrin.h>
 #endif
@@ -59,30 +65,38 @@
 #undef SM_
 #define SM_(s) SMCAT(SIMD_MAP_NAME, s)
 
+#define SM_VW_       SIMD_MAP_VAL_WORDS
 #define SM_KEY_GRP_  (64u + 32u * (SIMD_MAP_KEY_WORDS) * 8u)
-#define SM_VAL_SZ_   ((SIMD_MAP_VAL_WORDS) * 8u)
 #define SM_DMSK_     0x7FFFFFFFu
 
-#if SIMD_KV_LAYOUT == 1
-  #define SM_GRP_  (SM_KEY_GRP_ + 32u * SM_VAL_SZ_)
-#elif SIMD_KV_LAYOUT == 2
+#if SM_VW_ > 0
+  #define SM_VAL_SZ_ ((SIMD_MAP_VAL_WORDS) * 8u)
+  #if SIMD_MAP_LAYOUT == 1
+    #define SM_GRP_  (SM_KEY_GRP_ + 32u * SM_VAL_SZ_)
+  #elif SIMD_MAP_LAYOUT == 2
+    #define SM_GRP_  SM_KEY_GRP_
+  #elif SIMD_MAP_LAYOUT == 3
+    #define SM_GRP_       SM_KEY_GRP_
+    #define SM_BLK_SHIFT_ ((unsigned)__builtin_ctz(SIMD_MAP_BLOCK_STRIDE))
+    #define SM_BLK_MASK_  ((unsigned)(SIMD_MAP_BLOCK_STRIDE) - 1u)
+    #define SM_SUPER_     ((size_t)(SIMD_MAP_BLOCK_STRIDE) * SM_KEY_GRP_ + \
+                           (size_t)(SIMD_MAP_BLOCK_STRIDE) * 32u * SM_VAL_SZ_)
+  #endif
+#else
   #define SM_GRP_  SM_KEY_GRP_
-#elif SIMD_KV_LAYOUT == 3
-  #define SM_GRP_       SM_KEY_GRP_
-  #define SM_BLK_SHIFT_ ((unsigned)__builtin_ctz(SIMD_KV_BLOCK_STRIDE))
-  #define SM_BLK_MASK_  ((unsigned)(SIMD_KV_BLOCK_STRIDE) - 1u)
-  #define SM_SUPER_     ((size_t)(SIMD_KV_BLOCK_STRIDE) * SM_KEY_GRP_ + \
-                         (size_t)(SIMD_KV_BLOCK_STRIDE) * 32u * SM_VAL_SZ_)
 #endif
 
 /* --- Types --- */
 
 struct SM_(_key) { uint64_t w[SIMD_MAP_KEY_WORDS]; };
+
+#if SM_VW_ > 0
 struct SM_(_val) { uint64_t w[SIMD_MAP_VAL_WORDS]; };
+#endif
 
 struct SIMD_MAP_NAME {
     char    *data;
-#if SIMD_KV_LAYOUT == 2
+#if SM_VW_ > 0 && SIMD_MAP_LAYOUT == 2
     char    *val_data;
 #endif
     uint32_t count;
@@ -127,28 +141,12 @@ static inline uint16_t SM_(_overflow_bit)(uint32_t hi) {
 /* --- Helpers --- */
 
 static inline char *SM_(_group)(const struct SIMD_MAP_NAME *m, uint32_t gi) {
-#if SIMD_KV_LAYOUT == 3
+#if SM_VW_ > 0 && SIMD_MAP_LAYOUT == 3
     uint32_t super = gi >> SM_BLK_SHIFT_;
     uint32_t local = gi & SM_BLK_MASK_;
     return m->data + (size_t)super * SM_SUPER_ + (size_t)local * SM_KEY_GRP_;
 #else
     return m->data + (size_t)gi * SM_GRP_;
-#endif
-}
-
-static inline struct SM_(_val) *SM_(_val_at)(const struct SIMD_MAP_NAME *m,
-                                              uint32_t gi, int slot) {
-#if SIMD_KV_LAYOUT == 1
-    char *grp = m->data + (size_t)gi * SM_GRP_;
-    return (struct SM_(_val) *)(grp + SM_KEY_GRP_) + slot;
-#elif SIMD_KV_LAYOUT == 2
-    return (struct SM_(_val) *)(m->val_data) + (size_t)gi * 32 + slot;
-#elif SIMD_KV_LAYOUT == 3
-    uint32_t super = gi >> SM_BLK_SHIFT_;
-    uint32_t local = gi & SM_BLK_MASK_;
-    char *sb = m->data + (size_t)super * SM_SUPER_;
-    char *vb = sb + (size_t)SIMD_KV_BLOCK_STRIDE * SM_KEY_GRP_;
-    return (struct SM_(_val) *)(vb) + (size_t)local * 32 + slot;
 #endif
 }
 
@@ -164,10 +162,28 @@ static inline void SM_(_key_copy)(struct SM_(_key) *dst, const uint64_t *key) {
         dst->w[i] = key[i];
 }
 
+#if SM_VW_ > 0
+static inline struct SM_(_val) *SM_(_val_at)(const struct SIMD_MAP_NAME *m,
+                                              uint32_t gi, int slot) {
+#if SIMD_MAP_LAYOUT == 1
+    char *grp = m->data + (size_t)gi * SM_GRP_;
+    return (struct SM_(_val) *)(grp + SM_KEY_GRP_) + slot;
+#elif SIMD_MAP_LAYOUT == 2
+    return (struct SM_(_val) *)(m->val_data) + (size_t)gi * 32 + slot;
+#elif SIMD_MAP_LAYOUT == 3
+    uint32_t super = gi >> SM_BLK_SHIFT_;
+    uint32_t local = gi & SM_BLK_MASK_;
+    char *sb = m->data + (size_t)super * SM_SUPER_;
+    char *vb = sb + (size_t)SIMD_MAP_BLOCK_STRIDE * SM_KEY_GRP_;
+    return (struct SM_(_val) *)(vb) + (size_t)local * 32 + slot;
+#endif
+}
+
 static inline void SM_(_val_copy)(struct SM_(_val) *dst, const uint64_t *val) {
     for (int i = 0; i < SIMD_MAP_VAL_WORDS; i++)
         dst->w[i] = val[i];
 }
+#endif /* SM_VW_ > 0 */
 
 /* --- Prefetch --- */
 
@@ -196,7 +212,7 @@ static inline void SM_(_prefetch)(const struct SIMD_MAP_NAME *m,
 #endif
 }
 
-/* Lightweight prefetch for insert paths: metadata line only.
+/* Lightweight prefetch for insert/delete paths: metadata line only.
  * Key/value writes use write-allocate through the store buffer. */
 static inline void SM_(_prefetch_insert)(const struct SIMD_MAP_NAME *m,
                                           const uint64_t *key) {
@@ -290,7 +306,7 @@ static inline uint32_t SM_(_empty)(const uint16_t *meta) {
 /* --- Alloc / grow --- */
 
 static size_t SM_(_mapsize)(uint32_t cap) {
-#if SIMD_KV_LAYOUT == 3
+#if SM_VW_ > 0 && SIMD_MAP_LAYOUT == 3
     size_t raw = (size_t)((cap >> 5) >> SM_BLK_SHIFT_) * SM_SUPER_;
 #else
     size_t raw = (size_t)(cap >> 5) * SM_GRP_;
@@ -298,7 +314,7 @@ static size_t SM_(_mapsize)(uint32_t cap) {
     return (raw + (2u << 20) - 1) & ~((size_t)(2u << 20) - 1);
 }
 
-#if SIMD_KV_LAYOUT == 2
+#if SM_VW_ > 0 && SIMD_MAP_LAYOUT == 2
 static size_t SM_(_val_mapsize)(uint32_t cap) {
     size_t raw = (size_t)cap * SM_VAL_SZ_;
     return (raw + (2u << 20) - 1) & ~((size_t)(2u << 20) - 1);
@@ -306,9 +322,9 @@ static size_t SM_(_val_mapsize)(uint32_t cap) {
 #endif
 
 static void SM_(_alloc)(struct SIMD_MAP_NAME *m, uint32_t cap) {
-#if SIMD_KV_LAYOUT == 3
-    if (cap < 32u * SIMD_KV_BLOCK_STRIDE)
-        cap = 32u * SIMD_KV_BLOCK_STRIDE;
+#if SM_VW_ > 0 && SIMD_MAP_LAYOUT == 3
+    if (cap < 32u * SIMD_MAP_BLOCK_STRIDE)
+        cap = 32u * SIMD_MAP_BLOCK_STRIDE;
 #endif
     size_t total = SM_(_mapsize)(cap);
     m->data = (char *)mmap(NULL, total, PROT_READ | PROT_WRITE,
@@ -321,7 +337,7 @@ static void SM_(_alloc)(struct SIMD_MAP_NAME *m, uint32_t cap) {
         if (m->data != MAP_FAILED)
             madvise(m->data, total, MADV_HUGEPAGE);
     }
-#if SIMD_KV_LAYOUT == 2
+#if SM_VW_ > 0 && SIMD_MAP_LAYOUT == 2
     size_t vtotal = SM_(_val_mapsize)(cap);
     m->val_data = (char *)mmap(NULL, vtotal, PROT_READ | PROT_WRITE,
                                MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB
@@ -342,7 +358,7 @@ static void SM_(_alloc)(struct SIMD_MAP_NAME *m, uint32_t cap) {
 static void SM_(_grow)(struct SIMD_MAP_NAME *m) {
     uint32_t old_cap  = m->cap;
     char    *old_data = m->data;
-#if SIMD_KV_LAYOUT == 2
+#if SM_VW_ > 0 && SIMD_MAP_LAYOUT == 2
     char    *old_vd   = m->val_data;
 #endif
     uint32_t old_ng   = old_cap >> 5;
@@ -351,7 +367,7 @@ static void SM_(_grow)(struct SIMD_MAP_NAME *m) {
     uint32_t mask = m->mask;
 
     for (uint32_t g = 0; g < old_ng; g++) {
-#if SIMD_KV_LAYOUT == 3
+#if SM_VW_ > 0 && SIMD_MAP_LAYOUT == 3
         uint32_t osup = g >> SM_BLK_SHIFT_;
         uint32_t oloc = g & SM_BLK_MASK_;
         const char *old_grp = old_data + (size_t)osup * SM_SUPER_
@@ -365,17 +381,19 @@ static void SM_(_grow)(struct SIMD_MAP_NAME *m) {
         for (int s = 0; s < 31; s++) {
             if (!(om[s] & 0x8000)) continue;
 
+#if SM_VW_ > 0
             const struct SM_(_val) *ov;
-#if SIMD_KV_LAYOUT == 1
+  #if SIMD_MAP_LAYOUT == 1
             ov = (const struct SM_(_val) *)(old_grp + SM_KEY_GRP_) + s;
-#elif SIMD_KV_LAYOUT == 2
+  #elif SIMD_MAP_LAYOUT == 2
             ov = (const struct SM_(_val) *)old_vd + (size_t)g * 32 + s;
-#elif SIMD_KV_LAYOUT == 3
+  #elif SIMD_MAP_LAYOUT == 3
             ov = (const struct SM_(_val) *)(old_data
                     + (size_t)osup * SM_SUPER_
-                    + (size_t)SIMD_KV_BLOCK_STRIDE * SM_KEY_GRP_)
+                    + (size_t)SIMD_MAP_BLOCK_STRIDE * SM_KEY_GRP_)
                  + (size_t)oloc * 32 + s;
-#endif
+  #endif
+#endif /* SM_VW_ > 0 */
 
             struct SM_(_h) h = SM_(_hash)(ok[s].w);
             uint16_t h2  = SM_(_h2)(h.lo);
@@ -389,7 +407,9 @@ static void SM_(_grow)(struct SIMD_MAP_NAME *m) {
                     int pos = __builtin_ctz(em);
                     base[pos] = h2;
                     SM_(_key_copy)(&kp[pos], ok[s].w);
+#if SM_VW_ > 0
                     *SM_(_val_at)(m, gi, pos) = *ov;
+#endif
                     m->count++;
                     break;
                 }
@@ -399,7 +419,7 @@ static void SM_(_grow)(struct SIMD_MAP_NAME *m) {
         }
     }
     munmap(old_data, SM_(_mapsize)(old_cap));
-#if SIMD_KV_LAYOUT == 2
+#if SM_VW_ > 0 && SIMD_MAP_LAYOUT == 2
     munmap(old_vd, SM_(_val_mapsize)(old_cap));
 #endif
 }
@@ -420,10 +440,12 @@ static inline void SM_(_init_cap)(struct SIMD_MAP_NAME *m, uint32_t n) {
 
 static inline void SM_(_destroy)(struct SIMD_MAP_NAME *m) {
     if (m->data) munmap(m->data, SM_(_mapsize)(m->cap));
-#if SIMD_KV_LAYOUT == 2
+#if SM_VW_ > 0 && SIMD_MAP_LAYOUT == 2
     if (m->val_data) munmap(m->val_data, SM_(_val_mapsize)(m->cap));
 #endif
 }
+
+#if SM_VW_ > 0
 
 static inline int SM_(_insert)(struct SIMD_MAP_NAME *m,
                                 const uint64_t *key, const uint64_t *val) {
@@ -516,6 +538,72 @@ static inline uint64_t *SM_(_get)(struct SIMD_MAP_NAME *m,
     }
 }
 
+#else /* SM_VW_ == 0: set mode */
+
+static inline int SM_(_insert)(struct SIMD_MAP_NAME *m, const uint64_t *key) {
+    if (m->cap == 0) SM_(_alloc)(m, 32);
+    if (m->count * 8 >= m->cap * 7)
+        SM_(_grow)(m);
+
+    struct SM_(_h) h = SM_(_hash)(key);
+    uint16_t h2 = SM_(_h2)(h.lo);
+    uint32_t gi = h.lo & m->mask;
+
+    for (;;) {
+        char     *grp  = SM_(_group)(m, gi);
+        uint16_t *base = (uint16_t *)grp;
+        struct SM_(_key) *kp = (struct SM_(_key) *)(grp + 64);
+
+        uint32_t mm = SM_(_match)(base, h2);
+        while (mm) {
+            int pos = __builtin_ctz(mm);
+            if (SM_(_key_eq)(&kp[pos], key)) return 0;
+            mm &= mm - 1;
+        }
+
+        uint32_t em = SM_(_empty)(base);
+        if (em) {
+            int pos = __builtin_ctz(em);
+            base[pos] = h2;
+            SM_(_key_copy)(&kp[pos], key);
+            m->count++;
+            return 1;
+        }
+        base[31] |= SM_(_overflow_bit)(h.hi);
+        gi = (gi + 1) & m->mask;
+    }
+}
+
+static inline void SM_(_insert_unique)(struct SIMD_MAP_NAME *m,
+                                        const uint64_t *key) {
+    if (m->cap == 0) SM_(_alloc)(m, 32);
+    if (m->count * 8 >= m->cap * 7)
+        SM_(_grow)(m);
+
+    struct SM_(_h) h = SM_(_hash)(key);
+    uint16_t h2 = SM_(_h2)(h.lo);
+    uint32_t gi = h.lo & m->mask;
+
+    for (;;) {
+        char     *grp  = SM_(_group)(m, gi);
+        uint16_t *base = (uint16_t *)grp;
+        struct SM_(_key) *kp = (struct SM_(_key) *)(grp + 64);
+
+        uint32_t em = SM_(_empty)(base);
+        if (em) {
+            int pos = __builtin_ctz(em);
+            base[pos] = h2;
+            SM_(_key_copy)(&kp[pos], key);
+            m->count++;
+            return;
+        }
+        base[31] |= SM_(_overflow_bit)(h.hi);
+        gi = (gi + 1) & m->mask;
+    }
+}
+
+#endif /* SM_VW_ > 0 */
+
 static inline int SM_(_contains)(struct SIMD_MAP_NAME *m,
                                   const uint64_t *key) {
     if (__builtin_expect(m->cap == 0, 0)) return 0;
@@ -569,15 +657,28 @@ static inline int SM_(_delete)(struct SIMD_MAP_NAME *m, const uint64_t *key) {
 
 /* --- Cleanup --- */
 #undef SM_
+#undef SM_VW_
 #undef SM_KEY_GRP_
-#undef SM_VAL_SZ_
 #undef SM_DMSK_
 #undef SM_GRP_
+#ifdef SM_VAL_SZ_
+#undef SM_VAL_SZ_
+#endif
+#ifdef SM_BLK_SHIFT_
 #undef SM_BLK_SHIFT_
+#endif
+#ifdef SM_BLK_MASK_
 #undef SM_BLK_MASK_
+#endif
+#ifdef SM_SUPER_
 #undef SM_SUPER_
+#endif
 #undef SIMD_MAP_NAME
 #undef SIMD_MAP_KEY_WORDS
 #undef SIMD_MAP_VAL_WORDS
-#undef SIMD_KV_LAYOUT
-#undef SIMD_KV_BLOCK_STRIDE
+#ifdef SIMD_MAP_LAYOUT
+#undef SIMD_MAP_LAYOUT
+#endif
+#ifdef SIMD_MAP_BLOCK_STRIDE
+#undef SIMD_MAP_BLOCK_STRIDE
+#endif
