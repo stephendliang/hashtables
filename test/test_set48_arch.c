@@ -26,6 +26,10 @@
 #define SIMD_MAP_NAME t_lem
 #include "simd_map48_lemire.h"
 
+/* 6. 1CL/10 Lemire + backshift */
+#define SIMD_MAP_NAME t_lembs
+#include "simd_map48_lembs.h"
+
 #include <stdio.h>
 
 #define N 2000000
@@ -159,6 +163,7 @@ int main(void) {
     TEST_SET(t_2cl,  "2CL/20:",          make48);
     TEST_SET(t_bs,   "backshift 1CL/10:", make48_bs);
     TEST_SET(t_lem,  "lemire 1CL/10:",   make48);
+    TEST_SET(t_lembs, "lem+bs 1CL/10:",  make48_bs);
 
     return fail;
 }

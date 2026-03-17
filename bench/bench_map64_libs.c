@@ -12,7 +12,7 @@ KHASHL_SET_INIT(static, kh_u64_t, kh_u64, uint64_t, kh_hash_uint64, kh_eq_generi
 #define KEY_TY uint64_t
 #define HASH_FN vt_hash_integer
 #define CMPR_FN vt_cmpr_integer
-#include "../verstable.h"
+#include "../vendor/verstable.h"
 
 #include <stdio.h>
 #include <stdlib.h>

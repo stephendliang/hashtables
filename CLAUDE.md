@@ -55,7 +55,7 @@ Map API: `_insert(m, key, val)`, `_get(m, key)` → `uint64_t *`.
 workload** by 6–14% over N=2/4. In true interleaved pipelines, the
 alternating 1-line/2-line prefetch dispatch breaks the hardware
 prefetcher's stride detection for N≥2. N=2/4 only win pure insert-only
-(24% faster). Default: N=1, PF=24. See `KV64_LAYOUT_ANALYSIS.md`.
+(24% faster). Default: N=1, PF=24. See `docs/KV64_LAYOUT_ANALYSIS.md`.
 
 ### `simd_map48_packed.h` — direct-compare 48-bit set, packed 3×u16 (10 keys/CL)
 
@@ -113,6 +113,94 @@ scalar [8..9], AND (~14 instr).
 - Prefetch: 1 cache line for both read and write paths
 
 Set API: same as packed. `simd_set48_split.h` is a thin `#pragma once` wrapper.
+
+### `simd_map48_lembs.h` — direct-compare 48-bit set/map, Lemire + backshift + ghost overflow
+
+Combines Lemire non-pow2 addressing, backshift deletion, and ghost overflow
+bits. Uses the 4B padding at offset 60 as a 16-partition overflow word.
+
+```c
+// Set mode:
+#define SIMD_MAP_NAME my_set48lb
+#include "simd_map48_lembs.h"
+
+// Map mode:
+#define SIMD_MAP_NAME           my_map48lb
+#define SIMD_MAP48LB_VAL_WORDS  2
+#include "simd_map48_lembs.h"
+```
+
+Group layout (64B key block): `uint32_t hi[10]` at offset 0 (stored as
+`(key>>16)+1`, 0=empty), `uint16_t lo[10]` at offset 40, `uint32_t ovf` at
+offset 60 (ghost overflow, 16 partitions in bits [15:0]). Map mode: values
+stored inline after keys (64B keys + 10×VW×8B values).
+
+- Key: `uint64_t` (lower 48 bits, 0 reserved, `(key>>16)==0xFFFFFFFF` excluded)
+- Value: `uint64_t[VAL_WORDS]` (map mode only)
+- Group: 10 data slots, 64B key block + 10×VW×8B value block (map mode)
+- Load factor: 7/8 (87.5%)
+- h2: none (direct compare, zero false positives)
+- Overflow: 16-partition ghost bits at offset 60, `hash.hi & 15`
+- Addressing: Lemire fast range reduction (non-pow2 group count)
+- Backends: AVX2 (vpcmpeqd + vpcmpeqw), scalar (loop)
+- Delete: backshift (no tombstones), ghost overflow bits never cleared
+- Probe termination: overflow bit check (read paths), empty slot (backshift)
+- Prefetch: `_prefetch()` (key + value lines, read paths),
+  `_prefetch_insert()` (key line only, write paths)
+
+Ghost overflow bits are set when insert overflows past a group, never
+cleared on delete. Backshift repairs probe chains; ghost bits are a
+conservative acceleration structure for miss-path termination. Grow resets
+all ghost bits (fresh table). Same correctness guarantee as bitstealing.
+
+Set API: `_insert(m, key)`, `_contains(m, key)`, `_delete(m, key)`.
+Map API: `_insert(m, key, val)`, `_get(m, key)` → `uint64_t *`.
+
+**Set-mode architecture benchmark** (2M keys, AVX2, PF=24, ns/op):
+
+| Variant | Insert | Contains | Mixed 50/25/25 | Alloc |
+|-----------|--------|----------|----------------|-------|
+| split (baseline) | **3.9** | **3.4** | 7.4 | 16 MiB |
+| 3CL/31 | 6.5 | 5.3 | 11.4 | 24 |
+| 2CL/20 | 5.9 | 5.1 | 9.0 | 16 |
+| backshift | 5.0 | 4.9 | 7.8 | 32 |
+| lemire | 5.1 | 5.3 | 7.8 | 14 |
+| lem+bs (ghost ovf) | 6.3 | 5.3 | **6.6** | 14 |
+
+Split wins insert/contains. Lem+bs wins mixed at 14 MiB (12.5% less memory
+than split, 8-9% better mixed). The ghost overflow bits stabilized mixed
+(previous empty-slot termination at 75% LF spiked 7.9-12.4 ns). Cache line
+count is the dominant factor — all 1CL designs cluster together, multi-CL
+designs are 30-65% slower. See `docs/MAP48_ARCH_ANALYSIS.md`.
+
+**Map-mode TCP state benchmark** (2M connections, AVX2, PF=24, 4M ops):
+
+| Variant | 90/5/5 | 50/25/25 | Alloc | B/conn |
+|-----------|--------|----------|-------|--------|
+| map64 VW=1 | 9.5 | 10.7 | 128 MiB | 67 |
+| map64 VW=2 | 13.9 | 15.4 | 192 MiB | 101 |
+| map64 VW=4 | 20.8 | 22.7 | 320 MiB | 168 |
+| split VW=1 | 9.2 | 12.1 | 72 MiB | 38 |
+| split VW=2 | 9.6 | 12.6 | 112 MiB | 59 |
+| split VW=4 | 9.1 | 13.0 | 192 MiB | 101 |
+| **lembs VW=1** | **8.8** | 12.3 | **64 MiB** | **34** |
+| **lembs VW=2** | **9.3** | 13.0 | **98 MiB** | **51** |
+| **lembs VW=4** | **9.2** | 13.7 | **168 MiB** | **88** |
+
+Map64 collapses at VW≥2 (128B→192B entry breaks ACP, 3+ CLs per probe).
+Split and lembs are speed-equivalent — same 1CL key block, same value
+layout. Lembs uses 11-14% less memory at every VW from non-pow2 groups.
+At VW=4: lembs 9.2 ns / 168 MiB vs map64 20.8 ns / 320 MiB (2.3× faster,
+47% less memory).
+
+### Architecture variant headers (benchmark-only)
+
+| Header | Design | Slots | LF | Overflow | Delete |
+|--------|--------|-------|----|----------|--------|
+| `simd_map48_3cl.h` | 3CL/31, fully vectorized | 31 | 87.5% | sentinel | clear bit |
+| `simd_map48_2cl.h` | 2CL/20, ACP | 20 | 87.5% | sentinel | clear bit |
+| `simd_map48_bs.h` | 1CL/10, backshift | 10 | 75% | none | backshift |
+| `simd_map48_lemire.h` | 1CL/10, Lemire non-pow2 | 10 | 87.5% | sentinel | clear bit |
 
 ### `simd_sentinel.h` — unified set/map, sentinel overflow (31 data slots)
 
@@ -228,52 +316,74 @@ sequences (ghost overflow bits are monotonically preserved).
   Multiply-shift packs 4 MSBs to 4 consecutive bits. Empty detection is
   simpler: `~word & 0x8000...` directly tests OCC_BIT per lane.
 
-## File naming convention
+## Project layout
 
-`{purpose}_{type}_{topic}.c` where:
-- `test_` = correctness tests (must exit 0)
-- `bench_` = performance benchmarks (re-runnable, comparable)
+```
+include/     Library headers (the product). Use -Iinclude when compiling.
+vendor/      Third-party headers (benchmark comparison targets).
+test/        Correctness tests (must exit 0).
+bench/       Performance benchmarks (re-runnable, comparable).
+scripts/     Analysis scripts (Python).
+docs/        Benchmark analysis write-ups.
+archive/     Historical 128-bit prototypes (superseded by generic headers).
+```
 
-### Correctness tests
+Source naming: `{purpose}_{type}_{topic}.c` where `test_` = correctness,
+`bench_` = benchmark.
+
+### Correctness tests (`test/`)
 
 | File | Type | What it does |
 |------|------|-------------|
-| `test_map_generic.c` | generic set | Full suite at 128-bit + 256-bit, both sentinel and bitstealing |
-| `test_kv_generic.c` | generic map | Map correctness: 3 layouts × 2 overflow schemes, insert/get/delete/re-insert with value verification |
-| `test_kv64.c` | map64 | Map64 correctness: N=1,2,4,8 strides, VW=1 and VW=2, insert/get/delete/re-insert with value verification |
+| `test_set_generic.c` | generic set | Full suite at 128-bit + 256-bit, both sentinel and bitstealing |
+| `test_map_generic.c` | generic map | Map correctness: 3 layouts × 2 overflow schemes, insert/get/delete/re-insert with value verification |
+| `test_map64.c` | map64 | Map64 correctness: N=1,2,4,8 strides, VW=1 and VW=2, insert/get/delete/re-insert with value verification |
 | `test_map48.c` | map48 | Map48 correctness: set + map VW=1,2, insert/dup/contains/delete/re-insert |
-| `test_map48_direct.c` | map48 direct | Packed + split direct-compare 48-bit set correctness (2M keys) |
+| `test_set48_direct.c` | set48 direct | Packed + split direct-compare 48-bit set correctness (2M keys) |
+| `test_map48_direct.c` | map48 direct | Split/packed map-mode: VW=1,2 × N=1,2,4, insert/get/delete with value verification |
+| `test_set48_arch.c` | set48 arch | 6 architecture variants: split, 3CL, 2CL, backshift, lemire, lem+bs (2M keys) |
 
-### Benchmarks
+### Benchmarks (`bench/`)
 
 | File | Type | What it does |
 |------|------|-------------|
 | `bench_map64_libs.c` | set64 | simd_set64 vs verstable vs khashl (C side). Linked with C++ driver. |
 | `bench_map64_libs_main.cpp` | set64 | C++ driver: adds boost::unordered_flat_set to above comparison. |
 | `bench_map64_backends.c` | set64 | AVX-512 vs AVX2 vs scalar backend comparison + post-churn lookup. Build two binaries: one native, one with `-mno-avx512f`. |
-| `bench_kv_layout.c` | generic map | Grid search: 3 layouts × 2 overflow × PF sweep. 16 instantiations. TSV output. |
-| `bench_kv_pf_tuning.c` | generic map | PF distance sweep + delete prefetch mode A/B. Sentinel inline (KW=2, VW=1). TSV output. |
-| `bench_kv64_layout.c` | map64 | 2D grid search: block stride (N=1,2,4) × PF distance (4–64). 7 workloads. TSV output. |
-| `bench_kv_vs_boost.c` | generic map | Map sentinel/bitstealing vs boost::unordered_flat_map (C side). Linked with C++ driver. |
-| `bench_kv_vs_boost_main.cpp` | generic map | C++ driver: boost benchmark + orchestration. 10 workloads: insert-only, 5 read/write ratios, 4 churn profiles. TSV output. |
+| `bench_map_layout.c` | generic map | Grid search: 3 layouts × 2 overflow × PF sweep. 16 instantiations. TSV output. |
+| `bench_map_pf_tuning.c` | generic map | PF distance sweep + delete prefetch mode A/B. Sentinel inline (KW=2, VW=1). TSV output. |
+| `bench_map64_layout.c` | map64 | 2D grid search: block stride (N=1,2,4) × PF distance (4–64). 7 workloads. TSV output. |
+| `bench_map_vs_boost.c` | generic map | Map sentinel/bitstealing vs boost::unordered_flat_map (C side). Linked with C++ driver. |
+| `bench_map_vs_boost_main.cpp` | generic map | C++ driver: boost benchmark + orchestration. 10 workloads: insert-only, 5 read/write ratios, 4 churn profiles. TSV output. |
 | `bench_map48.c` | map48 | map48 vs sentinel(KW=1) vs map64, insert/contains/mixed. |
 | `bench_map48_direct.c` | map48 direct | packed vs split vs map48 vs map64, insert/contains/mixed. |
+| `bench_map48_arch.c` | map48 arch | 6 architecture variants: split, 3CL, 2CL, backshift, lemire, lem+bs. Speed + memory. |
+| `bench_tcp_pareto.c` | map48 tcp | Map-mode pareto: map64 vs split vs packed × N=1,2 × 90/5/5 + 50/25/25. PF sweep. |
+| `bench_tcp_state.c` | map48 tcp | Map-mode state: map64 vs split vs lembs × VW=1,2,4 × 90/5/5 + 50/25/25. |
 
-### Third-party headers (vendored for benchmarks)
+### Third-party headers (`vendor/`)
 
 | File | What it is |
 |------|-----------|
 | `verstable.h` | Verstable v2.2.1 — C99 open-addressing hash table (benchmark comparison target) |
 
-### Documentation
+### Documentation (`docs/`)
 
 | File | What it does |
 |------|-------------|
 | `WHY_NOT_PHF.md` | Analysis of why perfect hash maps lose to open addressing at scale |
-| `KV_LAYOUT_ANALYSIS.md` | Map value layout strategy benchmark: inline vs separate vs hybrid, ANOVA analysis across sentinel and bitstealing |
-| `KV_BOOST_COMPARISON.md` | Map vs boost::unordered_flat_map benchmark: 10 workloads, ANOVA analysis, crossover analysis |
-| `KV64_LAYOUT_ANALYSIS.md` | Map64 superblock layout benchmark: N=1,2,4 × PF 2D grid, read vs write tradeoff analysis |
-| `analyze_kv_pf_tuning.py` | Tabular analysis of PF tuning TSV runs: median ns/op vs PF, optimal PF, meta vs full pairwise |
+| `KV_LAYOUT_ANALYSIS.md` | Map value layout strategy benchmark: inline vs separate vs hybrid, ANOVA analysis |
+| `KV_BOOST_COMPARISON.md` | Map vs boost::unordered_flat_map: 10 workloads, ANOVA analysis, crossover analysis |
+| `KV64_LAYOUT_ANALYSIS.md` | Map64 superblock layout benchmark: N=1,2,4 × PF 2D grid, read vs write tradeoff |
+| `MAP48_ARCH_ANALYSIS.md` | Map48 architecture comparison: 6 set-mode variants + map-mode TCP benchmark |
+
+### Analysis scripts (`scripts/`)
+
+| File | What it does |
+|------|-------------|
+| `analyze_kv_bench.py` | Tabular analysis of map layout benchmark TSV output |
+| `analyze_kv_pf_tuning.py` | Tabular analysis of map PF tuning TSV runs: median ns/op vs PF, optimal PF, meta vs full pairwise |
+| `analyze_kv_vs_boost.py` | Tabular analysis of map vs boost comparison TSV output |
 
 ### Archive (`archive/`)
 
@@ -309,53 +419,81 @@ hit. Prefetch hides this latency PF=24 iterations ahead.
 
 ## Build
 
+Requires `-march=native` (AVX2/AVX-512 backend selection) and BMI2 (`pext`).
+
 ```sh
-# generic set correctness (128-bit + 256-bit, sentinel + bitstealing)
-cc -O3 -march=native -std=gnu11 -o test_generic test_map_generic.c
-
-# generic set scalar backend
-cc -O3 -march=native -mno-avx2 -mno-avx512f -std=gnu11 -o test_generic_scalar test_map_generic.c
-
-# set64 backend comparison (AVX-512 vs AVX2)
-cc -O3 -march=native -std=gnu11 -o bench_512 bench_map64_backends.c
-cc -O3 -march=native -mno-avx512f -std=gnu11 -o bench_avx2 bench_map64_backends.c
-
-# map64 correctness (N=1,2,4,8, VW=1 and VW=2)
-cc -O3 -march=native -std=gnu11 -o test_kv64 test_kv64.c
-
-# map64 scalar backend correctness
-cc -O3 -march=native -mno-avx2 -mno-avx512f -std=gnu11 -o test_kv64_scalar test_kv64.c
-
-# generic map correctness (all 6 variants: 3 layouts × 2 overflow)
-cc -O3 -march=native -std=gnu11 -o test_kv test_kv_generic.c
-
-# generic map scalar backend correctness
-cc -O3 -march=native -mno-avx2 -mno-avx512f -std=gnu11 -o test_kv_scalar test_kv_generic.c
-
-# map64 layout benchmark (N=1,2,4 × PF 2D grid)
-cc -O3 -march=native -std=gnu11 -o bench_kv64 bench_kv64_layout.c
-
-# generic map layout benchmark (16 instantiations, PF sweep, churn)
-cc -O3 -march=native -std=gnu11 -o bench_kv bench_kv_layout.c
-
-# generic map PF tuning (PF sweep + delete prefetch A/B)
-cc -O3 -march=native -std=gnu11 -o bench_pf bench_kv_pf_tuning.c
-
-# map48 correctness (sentinel + direct-compare packed/split)
-cc -O3 -march=native -std=gnu11 -o test_map48 test_map48.c
-cc -O3 -march=native -std=gnu11 -o test_map48_direct test_map48_direct.c
-cc -O3 -march=native -mno-avx2 -mno-avx512f -std=gnu11 -o test_map48_direct_scalar test_map48_direct.c
-
-# map48 direct-compare benchmark (packed vs split vs map48 vs map64)
-cc -O3 -march=native -std=gnu11 -o bench_map48_direct bench_map48_direct.c
-
-# generic map vs boost::unordered_flat_map (C/C++ linkage)
-cc -O3 -march=native -std=gnu11 -c bench_kv_vs_boost.c
-c++ -O3 -march=native -std=c++17 -c bench_kv_vs_boost_main.cpp
-c++ -O3 -o bench_kv_vs_boost bench_kv_vs_boost.o bench_kv_vs_boost_main.o
+make            # build all tests (native + scalar)
+make test       # build + run all 13 tests
+make bench      # build all benchmarks
+make clean      # rm -rf build/
+make test_map64 # build individual target
+make -j$(nproc) # parallel build
+make archive    # build 5 archive targets (opt-in)
 ```
 
-`-march=native` is required (selects AVX2 or AVX-512 backend). BMI2 (`pext`)
-is present on all AVX2 CPUs that matter (Haswell+, Zen2+).
-`-mno-avx2 -mno-avx512f` forces the scalar (SWAR) backend while keeping
-SSE4.2 (CRC32 hash, `_mm_prefetch`).
+Binaries output to `build/` (gitignored). `-Iinclude` resolves library
+headers. Scalar variants add `-mno-avx2 -mno-avx512f` (keeps SSE4.2 for
+CRC32 hash + `_mm_prefetch`).
+
+<details>
+<summary>Manual build commands (reference)</summary>
+
+```sh
+# generic set correctness (128-bit + 256-bit, sentinel + bitstealing)
+cc -O3 -march=native -std=gnu11 -Iinclude -o build/test_set_generic test/test_set_generic.c
+
+# generic set scalar backend
+cc -O3 -march=native -mno-avx2 -mno-avx512f -std=gnu11 -Iinclude -o build/test_set_generic_scalar test/test_set_generic.c
+
+# set64 backend comparison (AVX-512 vs AVX2)
+cc -O3 -march=native -std=gnu11 -Iinclude -o build/bench_512 bench/bench_map64_backends.c -lm
+cc -O3 -march=native -mno-avx512f -std=gnu11 -Iinclude -o build/bench_avx2 bench/bench_map64_backends.c -lm
+
+# map64 correctness (N=1,2,4,8, VW=1 and VW=2)
+cc -O3 -march=native -std=gnu11 -Iinclude -o build/test_map64 test/test_map64.c
+
+# map64 scalar backend correctness
+cc -O3 -march=native -mno-avx2 -mno-avx512f -std=gnu11 -Iinclude -o build/test_map64_scalar test/test_map64.c
+
+# generic map correctness (all 6 variants: 3 layouts × 2 overflow)
+cc -O3 -march=native -std=gnu11 -Iinclude -o build/test_map_generic test/test_map_generic.c
+
+# generic map scalar backend correctness
+cc -O3 -march=native -mno-avx2 -mno-avx512f -std=gnu11 -Iinclude -o build/test_map_generic_scalar test/test_map_generic.c
+
+# map64 layout benchmark (N=1,2,4 × PF 2D grid)
+cc -O3 -march=native -std=gnu11 -Iinclude -o build/bench_map64_layout bench/bench_map64_layout.c
+
+# generic map layout benchmark (16 instantiations, PF sweep, churn)
+cc -O3 -march=native -std=gnu11 -Iinclude -o build/bench_map_layout bench/bench_map_layout.c
+
+# generic map PF tuning (PF sweep + delete prefetch A/B)
+cc -O3 -march=native -std=gnu11 -Iinclude -o build/bench_map_pf_tuning bench/bench_map_pf_tuning.c
+
+# map48 correctness (sentinel + direct-compare packed/split)
+cc -O3 -march=native -std=gnu11 -Iinclude -o build/test_map48 test/test_map48.c
+cc -O3 -march=native -std=gnu11 -Iinclude -o build/test_set48_direct test/test_set48_direct.c
+cc -O3 -march=native -mno-avx2 -mno-avx512f -std=gnu11 -Iinclude -o build/test_set48_direct_scalar test/test_set48_direct.c
+
+# map48 direct-compare map correctness (split/packed map-mode)
+cc -O3 -march=native -std=gnu11 -Iinclude -o build/test_map48_direct test/test_map48_direct.c
+cc -O3 -march=native -mno-avx2 -mno-avx512f -std=gnu11 -Iinclude -o build/test_map48_direct_scalar test/test_map48_direct.c
+
+# map48 direct-compare benchmark (packed vs split vs map48 vs map64)
+cc -O3 -march=native -std=gnu11 -Iinclude -o build/bench_map48_direct bench/bench_map48_direct.c
+
+# set48 architecture variants (6 variants: split, 3CL, 2CL, backshift, lemire, lem+bs)
+cc -O3 -march=native -std=gnu11 -Iinclude -o build/test_set48_arch test/test_set48_arch.c
+cc -O3 -march=native -mno-avx2 -mno-avx512f -std=gnu11 -Iinclude -o build/test_set48_arch_scalar test/test_set48_arch.c
+cc -O3 -march=native -std=gnu11 -Iinclude -o build/bench_map48_arch bench/bench_map48_arch.c
+
+# map48 TCP state benchmark (map64 vs split vs lembs × VW=1,2,4)
+cc -O3 -march=native -std=gnu11 -Iinclude -o build/bench_tcp_state bench/bench_tcp_state.c
+
+# generic map vs boost::unordered_flat_map (C/C++ linkage)
+cc -O3 -march=native -std=gnu11 -Iinclude -c -o build/bench_map_vs_boost.o bench/bench_map_vs_boost.c
+c++ -O3 -march=native -std=c++17 -c -o build/bench_map_vs_boost_main.o bench/bench_map_vs_boost_main.cpp
+c++ -O3 -o build/bench_map_vs_boost build/bench_map_vs_boost.o build/bench_map_vs_boost_main.o
+```
+
+</details>

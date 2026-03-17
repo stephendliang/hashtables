@@ -32,6 +32,10 @@
 #define SIMD_MAP_NAME b_lem
 #include "simd_map48_lemire.h"
 
+/* 6. lemire + backshift */
+#define SIMD_MAP_NAME b_lembs
+#include "simd_map48_lembs.h"
+
 #include <stdio.h>
 #include <time.h>
 
@@ -246,6 +250,26 @@ int main(void) {
             b_lem_destroy(&m);
             hp_free(keys, (size_t)N_INSERT * 8);
         }
+
+        /* lemire+backshift */
+        {
+            memcpy(xs, seed, sizeof(xs));
+            uint64_t *keys = gen_keys(N_INSERT, make48_bs);
+            struct b_lembs m;
+            b_lembs_init_cap(&m, N_INSERT);
+            double alloc = (double)b_lembs_mapsize(m.ng) / (1024.0 * 1024.0);
+            double t0 = now_ns();
+            for (int i = 0; i < N_INSERT; i++) {
+                if (i + PF < N_INSERT)
+                    b_lembs_prefetch_insert(&m, keys[i + PF]);
+                b_lembs_insert_unique(&m, keys[i]);
+            }
+            double dt = now_ns() - t0;
+            printf("lem+bs\tinsert_only\t%.1f\t%u\t%.1f\n",
+                   dt / N_INSERT, m.count, alloc);
+            b_lembs_destroy(&m);
+            hp_free(keys, (size_t)N_INSERT * 8);
+        }
     }
 
     /* === CONTAINS HIT === */
@@ -357,6 +381,28 @@ int main(void) {
             printf("lemire\tcontains_hit\t%.1f\t%d\t%.1f\n",
                    dt / N_INSERT, hits, alloc);
             b_lem_destroy(&m);
+            hp_free(keys, (size_t)N_INSERT * 8);
+        }
+
+        /* lemire+backshift */
+        {
+            memcpy(xs, seed, sizeof(xs));
+            uint64_t *keys = gen_keys(N_INSERT, make48_bs);
+            struct b_lembs m;
+            b_lembs_init_cap(&m, N_INSERT);
+            for (int i = 0; i < N_INSERT; i++) b_lembs_insert_unique(&m, keys[i]);
+            double alloc = (double)b_lembs_mapsize(m.ng) / (1024.0 * 1024.0);
+            double t0 = now_ns();
+            int hits = 0;
+            for (int i = 0; i < N_INSERT; i++) {
+                if (i + PF < N_INSERT)
+                    b_lembs_prefetch(&m, keys[i + PF]);
+                hits += b_lembs_contains(&m, keys[i]);
+            }
+            double dt = now_ns() - t0;
+            printf("lem+bs\tcontains_hit\t%.1f\t%d\t%.1f\n",
+                   dt / N_INSERT, hits, alloc);
+            b_lembs_destroy(&m);
             hp_free(keys, (size_t)N_INSERT * 8);
         }
     }
@@ -528,6 +574,39 @@ int main(void) {
             printf("lemire\tmixed_50_25_25\t%.1f\t%u\t%.1f\n",
                    dt / w.n, m.count, alloc);
             b_lem_destroy(&m);
+            hp_free(pool_keys, (size_t)pool * 8);
+            free_mixed(&w, pool);
+        }
+
+        /* lemire+backshift */
+        {
+            memcpy(xs, mix_seed, sizeof(xs));
+            uint64_t *pool_keys = gen_keys(pool, make48_bs);
+            struct mixed_work w = gen_mixed(pool, N_CHURN, make48_bs);
+            struct b_lembs m;
+            b_lembs_init_cap(&m, pool * 2);
+            double alloc = (double)b_lembs_mapsize(m.ng) / (1024.0 * 1024.0);
+            for (int i = 0; i < pool; i++) b_lembs_insert_unique(&m, pool_keys[i]);
+            double t0 = now_ns();
+            for (int i = 0; i < w.n; i++) {
+                uint64_t k = w.keys[pool + i];
+                if (i + PF < w.n) {
+                    uint64_t pk = w.keys[pool + i + PF];
+                    if (w.ops[i + PF] == OP_INS)
+                        b_lembs_prefetch_insert(&m, pk);
+                    else
+                        b_lembs_prefetch(&m, pk);
+                }
+                switch (w.ops[i]) {
+                    case OP_GET: b_lembs_contains(&m, k); break;
+                    case OP_INS: b_lembs_insert(&m, k); break;
+                    case OP_DEL: b_lembs_delete(&m, k); break;
+                }
+            }
+            double dt = now_ns() - t0;
+            printf("lem+bs\tmixed_50_25_25\t%.1f\t%u\t%.1f\n",
+                   dt / w.n, m.count, alloc);
+            b_lembs_destroy(&m);
             hp_free(pool_keys, (size_t)pool * 8);
             free_mixed(&w, pool);
         }

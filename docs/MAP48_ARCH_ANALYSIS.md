@@ -1,27 +1,29 @@
 # Map48 Architecture Comparison
 
-5 split48 variants benchmarked at 2M keys, AVX2, i9-12900HK, PF=24.
+6 split48 variants benchmarked at 2M keys, AVX2, i9-12900HK, PF=24.
 All use hi32+lo16 key split with direct SIMD comparison.
 
 ## Variants
 
-| # | Variant | Group size | Slots | Load factor | Overflow | Delete |
-|---|---------|-----------|-------|-------------|----------|--------|
+| # | Variant | Group size | Slots | LF | Overflow | Delete |
+|---|---------|-----------|-------|----|----------|--------|
 | 1 | **split** (baseline) | 1CL (64B) | 10 | 87.5% | sentinel 16-part | clear occ bit |
 | 2 | 3CL/31 | 3CL (192B) | 31 | 87.5% | sentinel 16-part | clear occ bit |
 | 3 | 2CL/20 | 2CL (128B) | 20 | 87.5% | sentinel 16-part | clear occ bit |
 | 4 | backshift | 1CL (64B) | 10 | 75% | none (empty-slot) | backshift |
 | 5 | lemire | 1CL (64B) | 10 | 87.5% | sentinel 16-part | clear occ bit |
+| 6 | lem+bs | 1CL (64B) | 10 | 87.5% | ghost 16-part | backshift |
 
 ## Results (ns/op, median of 3 runs)
 
 | Variant | Insert | Contains | Mixed 50/25/25 | Alloc (MiB) |
 |-----------|--------|----------|----------------|-------------|
-| **split** | **3.9** | **3.4** | **7.4** | 16 |
+| **split** | **3.9** | **3.4** | 7.4 | 16 |
 | 3CL/31 | 6.5 | 5.3 | 11.4 | 24 |
 | 2CL/20 | 5.9 | 5.1 | 9.0 | 16 |
 | backshift | 5.0 | 4.9 | 7.8 | 32 |
 | lemire | 5.1 | 5.3 | 7.8 | 14 |
+| lem+bs | 6.3 | 5.3 | **6.6** | 14 |
 
 ## Analysis
 
@@ -80,16 +82,45 @@ latency vs 1 for `and`, and more critically, the modular wrap (`gi++; if
 
 Not worth it: 2 MiB saved for 30%+ regression on primary operations.
 
+### Lem+bs: best mixed at 14 MiB via ghost overflow + backshift
+
+Combines Lemire addressing with backshift deletion AND ghost overflow bits
+in the 4B padding at offset 60. The ghost overflow bits (set on insert
+overflow, never cleared on delete) provide fast miss-path probe termination
+at 87.5% load factor — the same technique as `simd_bitstealing.h`.
+
+This was developed iteratively:
+1. First attempt: Lemire + backshift at 75% LF, empty-slot termination.
+   Result: 18 MiB (75% LF erased the Lemire savings), mixed was unstable
+   (7.9-12.4 ns) due to `% ng` division in backshift distance calculation.
+2. Second attempt: push to 87.5% LF, use the 4B padding as 16-partition
+   ghost overflow bits. Result: 14 MiB, mixed stabilized at 6.6-6.7 ns.
+
+Insert is 6.3 ns (62% slower than split) — the `imul+shr` Lemire reduction,
+overflow bit writes, and tighter packing all hurt. Contains is 5.3 ns (56%
+slower). But mixed is **6.6 ns — 11% faster than split** (7.4 ns). The mixed
+advantage comes from backshift keeping probe chains compact after deletes,
+combined with ghost overflow for fast miss termination. At 14 MiB, it uses
+12.5% less memory than split (16 MiB).
+
+Backshift still uses empty-slot termination internally (to find the end of
+the probe chain to repair), while the public contains/delete search path
+uses overflow bits. Ghost bits accumulate under churn but grow resets them
+(fresh table). Benchmarks show stable performance across 3 runs.
+
 ## Conclusion
 
-**Split 1CL/10 with sentinel overflow is the optimal 48-bit set architecture.**
+**Split 1CL/10 with sentinel overflow is the optimal 48-bit set architecture
+for insert/contains-heavy workloads.** For churn-heavy workloads (50/25/25),
+lem+bs is 11% faster at 12.5% less memory.
 
 The memory-latency bottleneck makes cache line count the dominant factor.
 No amount of compute optimization (full vectorization, fewer groups, non-pow2
 addressing) can compensate for touching additional cache lines. The 1CL
-designs (split, backshift, lemire) cluster together on mixed workloads
-(7.4-7.8 ns), while multi-CL designs are significantly worse (9.0-11.4).
-Within the 1CL cluster, sentinel overflow with pow2 masking is fastest.
+designs (split, backshift, lemire, lem+bs) cluster together on mixed workloads
+(6.6-7.8 ns), while multi-CL designs are significantly worse (9.0-11.4).
+Within the 1CL cluster, sentinel overflow with pow2 masking is fastest for
+pure insert/contains; ghost overflow + backshift wins mixed churn.
 
 Previous benchmark (packed vs split vs map48 vs map64) for reference:
 
@@ -180,10 +211,78 @@ Its h2 metadata approach means delete is a single bit-clear with no
 backshift, which helps churn workloads. But its multi-CL metadata groups
 (256B+) cost more on read-heavy workloads: 5.7 ns vs map64's 3.0 ns.
 
+### Conclusion (VW=1)
+
+**Map64 is the fastest VW=1 map at PF=64**, but only because its 128B entry
+aligns perfectly with ACP. At larger value sizes (VW≥2) this advantage
+vanishes — see TCP state benchmark below.
+
+## Map mode (VW=1,2,4): TCP connection state benchmark
+
+Map-mode benchmark with 2M connections at VW=1 (8B: counter), VW=2 (16B:
+timestamp + flags), VW=4 (32B: full connection state). PF=24, 4M ops per
+workload. Compares map64, split, and lem+bs (the two Pareto-optimal 48-bit
+direct-compare headers).
+
+Entry sizes:
+- map64: 128B/192B/320B (VW=1/2/4) — 75% LF, pow2 groups
+- split: 144B/224B/384B (VW=1/2/4) — 87.5% LF, pow2 groups
+- lembs: 144B/224B/384B (VW=1/2/4) — 87.5% LF, non-pow2 groups
+
+### Results (ns/op, median of 3 runs, AVX2, PF=24)
+
+**90/5/5 (read-heavy, packet processing)**
+
+| Variant | VW=1 | VW=2 | VW=4 | MiB (1) | MiB (2) | MiB (4) |
+|---------|------|------|------|---------|---------|---------|
+| map64 | 9.5 | 13.9 | 20.8 | 128 | 192 | 320 |
+| split | 9.2 | 9.6 | **9.1** | 72 | 112 | 192 |
+| **lembs** | **8.8** | **9.3** | 9.2 | **64** | **98** | **168** |
+
+**50/25/25 (high churn)**
+
+| Variant | VW=1 | VW=2 | VW=4 | MiB (1) | MiB (2) | MiB (4) |
+|---------|------|------|------|---------|---------|---------|
+| map64 | **10.7** | 15.4 | 22.7 | 128 | 192 | 320 |
+| split | 12.1 | **12.6** | **13.0** | 72 | 112 | 192 |
+| lembs | 12.3 | 13.0 | 13.7 | **64** | **98** | **168** |
+
+### Map64 collapses at VW≥2
+
+Map64's VW=1 advantage (128B = 2 adjacent CLs, ACP pulls value CL free) does
+not scale. At VW=2, the entry grows to 192B (3 CLs) — the third CL is no
+longer adjacent to the first, ACP cannot help, and every value access is a
+true L1 miss. At VW=4, the entry is 320B (5 CLs) and map64 is 2.3× slower
+than split/lembs (20.8 vs 9.1 ns on 90/5/5).
+
+Map64 also wastes the most memory due to 75% LF: VW=4 uses 320 MiB vs
+lembs's 168 MiB (47% less).
+
+### Split and lembs: same speed, lembs wins memory
+
+Both use the same 1CL key block with inline values. The only difference is
+group addressing: pow2 mask (split) vs Lemire (lembs). At VW=1-4, the
+performance difference is within noise (<5%). But lembs consistently uses
+11-14% less memory from non-pow2 group counts:
+- VW=1: 64 vs 72 MiB (11%)
+- VW=2: 98 vs 112 MiB (12.5%)
+- VW=4: 168 vs 192 MiB (12.5%)
+
+### VW-insensitivity of split/lembs
+
+Remarkably, split and lembs show almost no speed degradation from VW=1 to
+VW=4 on 90/5/5 (9.2→9.1 and 8.8→9.2 ns). This is because 90% of ops are
+reads (get), and the value CL is prefetched alongside the key CL via
+`_prefetch()`. The hardware prefetcher and ACP bring additional value CLs for
+inline layouts. On 50/25/25, the 25% inserts cause write-allocate traffic to
+value CLs, adding ~1 ns per VW doubling — a gentle slope compared to map64's
+steep 10→23 ns climb.
+
 ### Conclusion
 
-**Map64 is the optimal map-mode container for 48-bit TCP keys.** It wins
-both workloads and the 128 MiB allocation is acceptable at 2M connections.
-Split/packed offer 1.8× better memory density (72 vs 128 MiB) but pay a
-70% churn penalty from the third cache line. The superblock layout does
-not fix this — it makes it worse by breaking HW adjacent-line prefetch.
+**Lembs is the optimal map-mode container for 48-bit keys at VW≥2.** It
+matches split's speed while using 11-14% less memory. At VW=4 (32B
+connection state), lembs is 2.3× faster than map64 at 47% less memory
+(168 vs 320 MiB). For memory-constrained deployments at any VW, lembs is
+the best choice. Map64 is only competitive at VW=1 on churn workloads
+(10.7 vs 12.3 ns) where its 2-CL ACP advantage still holds.
