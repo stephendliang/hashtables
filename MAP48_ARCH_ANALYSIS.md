@@ -99,3 +99,91 @@ Previous benchmark (packed vs split vs map48 vs map64) for reference:
 | packed | 4.0 | 4.3 | 7.4 |
 | map64 | 4.7 | 3.8 | 6.6 |
 | map48 (sentinel) | 6.7 | 10.1 | 13.6 |
+
+## Map mode (VW=1): TCP connection map benchmark
+
+Map-mode benchmark with 2M connections, VW=1 (8B value per key), two
+workloads: 90/5/5 (packet processing) and 50/25/25 (high churn). PF sweep
+16–64 with prefetch pipelined ops. Direct-compare variants only — sentinel
+and bitstealing provide no benefit for 48-bit keys (h2 metadata filtering
+is pointless when the entire key fits in a single SIMD comparison).
+
+Entry sizes with VW=1: map64 = 128B (2 CL), split/packed = 144B (3 CL),
+map48 = 256B+ (multi-CL metadata groups).
+
+### Results (ns/op, best PF per variant)
+
+| Variant | 90/5/5 | PF | 50/25/25 | PF | Alloc (MiB) | B/entry |
+|---------|--------|----|----------|----|-------------|---------|
+| map64 | **3.0** | 64 | **6.7** | 64 | 128 | 67.1 |
+| split N=1 | 5.2 | 64 | 12.2 | 24 | 72 | 37.7 |
+| map48 | 5.7 | 24 | 6.9 | 40 | 128 | 67.1 |
+| packed N=1 | 5.8 | 64 | 12.1 | 24 | 72 | 37.7 |
+| packed N=2 | 15.1 | 32 | 18.7 | 32 | 72 | 37.7 |
+| split N=2 | 20.5 | 32 | 22.8 | 24 | 72 | 37.7 |
+
+### Map64 wins both workloads
+
+Map64 is the fastest map-mode container for 48-bit keys. 128B entries (2 CL:
+64B keys + 64B values) give a clean power-of-2 stride. The HW adjacent-line
+prefetcher pulls the value CL for free when the key CL is fetched. Only 1
+fill buffer entry per operation despite touching 2 CLs.
+
+The 2× memory cost (128 vs 72 MiB) is the tradeoff. For the TCP use case
+at 2M connections, 128 MiB is acceptable.
+
+### Split/packed 50/25/25 churn regression: 3 CLs per entry
+
+Split/packed with VW=1 have 144B entries: 64B key block + 80B value block
+(10 slots × 8B). This spans 3 cache lines. On 90/5/5 (read-heavy), the
+third CL (value bytes 64–79, covering only slots 8–9) rarely matters —
+most lookups resolve without touching it. But on 50/25/25, 50% of ops are
+writes (insert + delete) that must touch the value region via
+write-allocate, and the extra CL adds measurable fill buffer pressure.
+
+Result: split/packed at 12 ns vs map64 at 7 ns — a ~70% churn regression
+entirely explained by the extra cache line per write operation.
+
+### Superblock layout (N=2): strictly worse
+
+The hypothesis: separating keys (N×64B stride) from values (N×80B stride)
+via superblock layout would restore HW-prefetcher-friendly access patterns
+and fix the churn regression.
+
+The result: 3–4× worse than inline. The hypothesis was wrong.
+
+**Root cause: HW adjacent-line prefetch.** With inline layout (N=1), the
+key CL at offset 0 and value CL at offset 64 of each 144B entry are
+physically adjacent. Intel's L2 adjacent-line prefetcher (ACP) automatically
+pulls the value CL when the key CL is fetched — effectively making the SW
+prefetch of the value CL a no-op (already in L1). This means inline layout
+consumes only 1 fill buffer entry per operation despite touching 2 CLs.
+
+With superblock layout (N=2), key CLs are grouped together and value CLs
+are 128+ bytes away — no longer adjacent. Every value access is a true L1
+miss requiring its own fill buffer entry. At PF=24 with 2 non-adjacent
+prefetches per op, that's 48 outstanding requests vs 12 fill buffer
+entries — 4× oversubscribed. The theoretical minimum latency with 2
+non-adjacent lines is ~17 ns/op (fill buffer throughput = 12 entries /
+~100 ns DRAM latency = 0.12 lines/ns; 2 lines/op → 1 op per 17 ns).
+Measured: 15–24 ns. Matches.
+
+This is the same effect seen in the set-mode 2CL/20 variant above: ACP
+cannot help when cache lines are not physically adjacent in the access
+stream. The difference is that set-mode has no value CLs to worry about,
+while map-mode's extra value CL is the critical factor.
+
+### Map48 (sentinel): competitive on churn, expensive on reads
+
+Map48 achieves 6.9 ns on 50/25/25 — nearly matching map64 (6.7 ns).
+Its h2 metadata approach means delete is a single bit-clear with no
+backshift, which helps churn workloads. But its multi-CL metadata groups
+(256B+) cost more on read-heavy workloads: 5.7 ns vs map64's 3.0 ns.
+
+### Conclusion
+
+**Map64 is the optimal map-mode container for 48-bit TCP keys.** It wins
+both workloads and the 128 MiB allocation is acceptable at 2M connections.
+Split/packed offer 1.8× better memory density (72 vs 128 MiB) but pay a
+70% churn penalty from the third cache line. The superblock layout does
+not fix this — it makes it worse by breaking HW adjacent-line prefetch.

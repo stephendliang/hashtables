@@ -1,23 +1,36 @@
 /*
- * simd_map48_split.h — direct-compare 48-bit set, split hi32+lo16
+ * simd_map48_split.h — direct-compare 48-bit set/map, split hi32+lo16
  *
  * 10 keys per 64B cache line. No metadata filtering — SIMD compares
  * hi32 (vpcmpeqd) and lo16 (vpcmpeqw) separately, then AND.
  *
- * Group layout (64B):
+ * Group layout (64B key block):
  *   Offset 0-3:   uint32_t ctrl
  *                    bits [9:0]   = occupancy (10 slots)
  *                    bits [25:10] = overflow (16 partitions)
  *                    bits [31:26] = reserved
  *   Offset 4-43:  uint32_t hi[10]  (upper 32 bits: key >> 16)
  *   Offset 44-63: uint16_t lo[10]  (lower 16 bits: key & 0xFFFF)
- *   Total: 4 + 40 + 20 = 64 bytes
+ *   Total key block: 4 + 40 + 20 = 64 bytes
  *
- * Set mode only. Key: uint64_t (lower 48 bits, upper 16 must be 0, key=0 reserved).
+ * Set mode when VAL_WORDS is omitted or 0, map mode when VAL_WORDS >= 1.
+ * Map mode: values stored inline after keys (64B keys + 10*VW*8B values).
+ * Key: uint64_t (lower 48 bits, upper 16 must be 0, key=0 reserved).
  * Backends: AVX2, scalar. Load factor: 7/8 (87.5%).
  *
+ * Set mode:
  *   #define SIMD_MAP_NAME my_set48s
  *   #include "simd_map48_split.h"
+ *
+ * Map mode:
+ *   #define SIMD_MAP_NAME              my_map48s
+ *   #define SIMD_MAP48S_VAL_WORDS      1
+ *   #define SIMD_MAP48S_BLOCK_STRIDE   1   // power of 2, default 1
+ *   #include "simd_map48_split.h"
+ *
+ * Superblock layout (BLOCK_STRIDE=N, map mode):
+ *   [N key groups (N×64B)] [N value groups (N×10×VW×8B)]
+ * N=1 degenerates to inline: [10 keys | 10 values] per group.
  */
 
 #ifndef SIMD_MAP_NAME
@@ -89,7 +102,36 @@ static inline void sm48s_write_key(void *grp, int slot, uint64_t key) {
 
 /* --- SIMD match --- */
 
-#if defined(__AVX2__)
+#if defined(__AVX512BW__)
+
+static inline uint16_t sm48s_match(const void *grp, uint64_t key) {
+    uint32_t key_hi = (uint32_t)(key >> 16);
+    uint16_t key_lo = (uint16_t)key;
+
+    /* Hi: vpcmpeqd zmm — all 10 hi-words, no scalar tail.
+     * Masked load: fault suppression for overread past last group. */
+    __m512i h16 = _mm512_maskz_loadu_epi32((__mmask16)SM48S_OCC_MASK_,
+                                           sm48s_hi_c(grp));
+    __mmask16 m_hi = _mm512_cmpeq_epi32_mask(h16, _mm512_set1_epi32((int)key_hi));
+
+    /* Lo: vpcmpeqw ymm — all 10 lo-words, no scalar tail.
+     * Masked load: fault suppression for overread past group. */
+    __m256i l16 = _mm256_maskz_loadu_epi16((__mmask16)SM48S_OCC_MASK_,
+                                           sm48s_lo_c(grp));
+    __mmask16 m_lo = _mm256_cmpeq_epi16_mask(l16, _mm256_set1_epi16((short)key_lo));
+
+    uint32_t ctrl = *sm48s_ctrl_c(grp);
+    return (uint16_t)(m_hi & m_lo) & (uint16_t)(ctrl & SM48S_OCC_MASK_);
+}
+
+static inline uint16_t sm48s_empty(const void *grp) {
+    uint32_t ctrl = *sm48s_ctrl_c(grp);
+    return (~ctrl) & SM48S_OCC_MASK_;
+}
+
+#define sm48s_prefetch_line(ptr) _mm_prefetch((const char *)(ptr), _MM_HINT_T0)
+
+#elif defined(__AVX2__)
 
 static inline uint16_t sm48s_match(const void *grp, uint64_t key) {
     uint32_t key_hi = (uint32_t)(key >> 16);
@@ -163,6 +205,34 @@ static inline uint16_t sm48s_empty(const void *grp) {
 #undef SM_
 #define SM_(s) SMCAT(SIMD_MAP_NAME, s)
 
+#ifndef SIMD_MAP48S_VAL_WORDS
+#define SIMD_MAP48S_VAL_WORDS 0
+#endif
+#ifndef SIMD_MAP48S_BLOCK_STRIDE
+#define SIMD_MAP48S_BLOCK_STRIDE 1
+#endif
+#if SIMD_MAP48S_BLOCK_STRIDE > 1 && (SIMD_MAP48S_BLOCK_STRIDE & (SIMD_MAP48S_BLOCK_STRIDE - 1))
+#error "SIMD_MAP48S_BLOCK_STRIDE must be a power of 2"
+#endif
+
+#define SM48S_VW_ (SIMD_MAP48S_VAL_WORDS)
+
+#if SM48S_VW_ > 0
+#define SM48S_VAL_SZ_   (SM48S_VW_ * 8u)
+#define SM48S_VAL_GRP_  (SM48S_SLOTS_ * SM48S_VAL_SZ_)
+#define SM48S_ENTRY_SZ_ (64u + SM48S_VAL_GRP_)
+
+struct SM_(_val) { uint64_t w[SM48S_VW_]; };
+#else
+#define SM48S_ENTRY_SZ_ 64u
+#endif
+
+#if SIMD_MAP48S_BLOCK_STRIDE > 1 && SM48S_VW_ > 0
+#define SM48S_BLK_SHIFT_ ((unsigned)__builtin_ctz(SIMD_MAP48S_BLOCK_STRIDE))
+#define SM48S_BLK_MASK_  ((unsigned)(SIMD_MAP48S_BLOCK_STRIDE) - 1u)
+#define SM48S_SUPER_     ((size_t)(SIMD_MAP48S_BLOCK_STRIDE) * SM48S_ENTRY_SZ_)
+#endif
+
 struct SIMD_MAP_NAME {
     char    *data;
     uint32_t count;
@@ -173,14 +243,39 @@ struct SIMD_MAP_NAME {
 /* --- Helpers --- */
 
 static inline char *SM_(_group)(const struct SIMD_MAP_NAME *m, uint32_t gi) {
-    return m->data + ((size_t)gi << 6);  /* gi * 64 bytes */
+#if SIMD_MAP48S_BLOCK_STRIDE > 1 && SM48S_VW_ > 0
+    uint32_t super = gi >> SM48S_BLK_SHIFT_;
+    uint32_t local = gi & SM48S_BLK_MASK_;
+    return m->data + (size_t)super * SM48S_SUPER_ + (size_t)local * 64;
+#else
+    return m->data + (size_t)gi * SM48S_ENTRY_SZ_;
+#endif
 }
+
+#if SM48S_VW_ > 0
+static inline uint64_t *SM_(_val_at)(const struct SIMD_MAP_NAME *m,
+                                      uint32_t gi, int slot) {
+#if SIMD_MAP48S_BLOCK_STRIDE > 1
+    uint32_t super = gi >> SM48S_BLK_SHIFT_;
+    uint32_t local = gi & SM48S_BLK_MASK_;
+    char *vb = m->data + (size_t)super * SM48S_SUPER_
+               + (size_t)SIMD_MAP48S_BLOCK_STRIDE * 64;
+    return (uint64_t *)(vb + (size_t)local * SM48S_VAL_GRP_
+                        + (unsigned)slot * SM48S_VAL_SZ_);
+#else
+    return (uint64_t *)(SM_(_group)(m, gi) + 64 + (unsigned)slot * SM48S_VAL_SZ_);
+#endif
+}
+#endif
 
 /* --- Prefetch --- */
 
 static inline void SM_(_prefetch)(const struct SIMD_MAP_NAME *m, uint64_t key) {
     uint32_t gi = sm48s_hash(key).lo & m->mask;
     sm48s_prefetch_line(SM_(_group)(m, gi));
+#if SM48S_VW_ > 0
+    sm48s_prefetch_line((const char *)SM_(_val_at)(m, gi, 0));
+#endif
 }
 
 static inline void SM_(_prefetch_insert)(const struct SIMD_MAP_NAME *m,
@@ -192,11 +287,18 @@ static inline void SM_(_prefetch_insert)(const struct SIMD_MAP_NAME *m,
 /* --- Alloc / grow --- */
 
 static size_t SM_(_mapsize)(uint32_t ng) {
-    size_t raw = (size_t)ng * 64;
+#if SIMD_MAP48S_BLOCK_STRIDE > 1 && SM48S_VW_ > 0
+    size_t raw = (size_t)(ng >> SM48S_BLK_SHIFT_) * SM48S_SUPER_;
+#else
+    size_t raw = (size_t)ng * SM48S_ENTRY_SZ_;
+#endif
     return (raw + (2u << 20) - 1) & ~((size_t)(2u << 20) - 1);
 }
 
 static void SM_(_alloc)(struct SIMD_MAP_NAME *m, uint32_t ng) {
+#if SIMD_MAP48S_BLOCK_STRIDE > 1
+    if (ng < SIMD_MAP48S_BLOCK_STRIDE) ng = SIMD_MAP48S_BLOCK_STRIDE;
+#endif
     size_t total = SM_(_mapsize)(ng);
     m->data = (char *)mmap(NULL, total, PROT_READ | PROT_WRITE,
                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB
@@ -221,7 +323,14 @@ static void SM_(_grow)(struct SIMD_MAP_NAME *m) {
     uint32_t mask = m->mask;
 
     for (uint32_t g = 0; g < old_ng; g++) {
-        const char *old_grp = old_data + ((size_t)g << 6);
+#if SIMD_MAP48S_BLOCK_STRIDE > 1 && SM48S_VW_ > 0
+        uint32_t osup = g >> SM48S_BLK_SHIFT_;
+        uint32_t oloc = g & SM48S_BLK_MASK_;
+        const char *old_grp = old_data + (size_t)osup * SM48S_SUPER_
+                              + (size_t)oloc * 64;
+#else
+        const char *old_grp = old_data + (size_t)g * SM48S_ENTRY_SZ_;
+#endif
         uint32_t ctrl = *(const uint32_t *)old_grp;
         uint16_t occ = (uint16_t)(ctrl & SM48S_OCC_MASK_);
 
@@ -241,6 +350,22 @@ static void SM_(_grow)(struct SIMD_MAP_NAME *m) {
                     uint32_t *cp = sm48s_ctrl(grp);
                     *cp |= (1u << pos);
                     sm48s_write_key(grp, pos, key);
+#if SM48S_VW_ > 0
+                    {
+#if SIMD_MAP48S_BLOCK_STRIDE > 1
+                        const char *old_val = old_data
+                            + (size_t)osup * SM48S_SUPER_
+                            + (size_t)SIMD_MAP48S_BLOCK_STRIDE * 64
+                            + (size_t)oloc * SM48S_VAL_GRP_
+                            + (unsigned)s * SM48S_VAL_SZ_;
+#else
+                        const char *old_val = old_grp + 64
+                            + (unsigned)s * SM48S_VAL_SZ_;
+#endif
+                        memcpy(SM_(_val_at)(m, gi, pos), old_val,
+                               SM48S_VAL_SZ_);
+                    }
+#endif
                     m->count++;
                     break;
                 }
@@ -271,7 +396,12 @@ static inline void SM_(_destroy)(struct SIMD_MAP_NAME *m) {
     if (m->data) munmap(m->data, SM_(_mapsize)(m->ng));
 }
 
+#if SM48S_VW_ > 0
+static inline int SM_(_insert)(struct SIMD_MAP_NAME *m, uint64_t key,
+                               const uint64_t *val) {
+#else
 static inline int SM_(_insert)(struct SIMD_MAP_NAME *m, uint64_t key) {
+#endif
     if (m->ng == 0) SM_(_alloc)(m, 16);
     if (m->count * 8 >= (uint64_t)m->ng * SM48S_SLOTS_ * 7) SM_(_grow)(m);
 
@@ -280,7 +410,14 @@ static inline int SM_(_insert)(struct SIMD_MAP_NAME *m, uint64_t key) {
 
     for (;;) {
         char *grp = SM_(_group)(m, gi);
-        if (sm48s_match(grp, key)) return 0;
+        uint16_t mm = sm48s_match(grp, key);
+        if (mm) {
+#if SM48S_VW_ > 0
+            int slot = __builtin_ctz(mm);
+            memcpy(SM_(_val_at)(m, gi, slot), val, SM48S_VAL_SZ_);
+#endif
+            return 0;
+        }
 
         uint16_t em = sm48s_empty(grp);
         if (em) {
@@ -288,6 +425,9 @@ static inline int SM_(_insert)(struct SIMD_MAP_NAME *m, uint64_t key) {
             uint32_t *cp = sm48s_ctrl(grp);
             *cp |= (1u << pos);
             sm48s_write_key(grp, pos, key);
+#if SM48S_VW_ > 0
+            memcpy(SM_(_val_at)(m, gi, pos), val, SM48S_VAL_SZ_);
+#endif
             m->count++;
             return 1;
         }
@@ -297,7 +437,12 @@ static inline int SM_(_insert)(struct SIMD_MAP_NAME *m, uint64_t key) {
     }
 }
 
+#if SM48S_VW_ > 0
+static inline void SM_(_insert_unique)(struct SIMD_MAP_NAME *m, uint64_t key,
+                                       const uint64_t *val) {
+#else
 static inline void SM_(_insert_unique)(struct SIMD_MAP_NAME *m, uint64_t key) {
+#endif
     if (m->ng == 0) SM_(_alloc)(m, 16);
     if (m->count * 8 >= (uint64_t)m->ng * SM48S_SLOTS_ * 7) SM_(_grow)(m);
 
@@ -312,6 +457,9 @@ static inline void SM_(_insert_unique)(struct SIMD_MAP_NAME *m, uint64_t key) {
             uint32_t *cp = sm48s_ctrl(grp);
             *cp |= (1u << pos);
             sm48s_write_key(grp, pos, key);
+#if SM48S_VW_ > 0
+            memcpy(SM_(_val_at)(m, gi, pos), val, SM48S_VAL_SZ_);
+#endif
             m->count++;
             return;
         }
@@ -335,6 +483,27 @@ static inline int SM_(_contains)(struct SIMD_MAP_NAME *m, uint64_t key) {
         gi = (gi + 1) & m->mask;
     }
 }
+
+#if SM48S_VW_ > 0
+static inline uint64_t *SM_(_get)(struct SIMD_MAP_NAME *m, uint64_t key) {
+    if (__builtin_expect(m->ng == 0, 0)) return NULL;
+
+    struct sm48s_h h = sm48s_hash(key);
+    uint32_t gi = h.lo & m->mask;
+
+    for (;;) {
+        char *grp = SM_(_group)(m, gi);
+        uint16_t mm = sm48s_match(grp, key);
+        if (mm) {
+            int slot = __builtin_ctz(mm);
+            return SM_(_val_at)(m, gi, slot);
+        }
+        uint32_t ctrl = *sm48s_ctrl_c(grp);
+        if (!((ctrl >> (SM48S_OVF_SHIFT_ + (h.hi & 15))) & 1)) return NULL;
+        gi = (gi + 1) & m->mask;
+    }
+}
+#endif
 
 static inline int SM_(_delete)(struct SIMD_MAP_NAME *m, uint64_t key) {
     if (__builtin_expect(m->ng == 0, 0)) return 0;
@@ -360,4 +529,17 @@ static inline int SM_(_delete)(struct SIMD_MAP_NAME *m, uint64_t key) {
 
 /* --- Cleanup --- */
 #undef SM_
+#undef SM48S_VW_
+#undef SM48S_ENTRY_SZ_
+#ifdef SM48S_VAL_SZ_
+#undef SM48S_VAL_SZ_
+#undef SM48S_VAL_GRP_
+#endif
+#ifdef SM48S_BLK_SHIFT_
+#undef SM48S_BLK_SHIFT_
+#undef SM48S_BLK_MASK_
+#undef SM48S_SUPER_
+#endif
 #undef SIMD_MAP_NAME
+#undef SIMD_MAP48S_VAL_WORDS
+#undef SIMD_MAP48S_BLOCK_STRIDE
