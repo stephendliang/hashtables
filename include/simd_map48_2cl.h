@@ -35,6 +35,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include "simd_compat.h"
 
 #ifndef SMCAT_
 #define SMCAT_(a, b) a##b
@@ -49,7 +50,7 @@
 /* Hash: CRC32 on SIMD paths, murmur3 finalizer on scalar */
 struct sm48_2cl_h { uint32_t lo, hi; };
 
-#if defined(__SSE4_2__)
+#if defined(__SSE4_2__) || defined(__ARM_FEATURE_CRC32)
 static inline struct sm48_2cl_h sm48_2cl_hash(uint64_t key) {
     uint32_t a = (uint32_t)_mm_crc32_u64(0, key);
     uint32_t b = (uint32_t)_mm_crc32_u64(a, key);
@@ -134,6 +135,47 @@ static inline uint32_t sm48_2cl_empty(const void *grp) {
 }
 
 #define sm48_2cl_prefetch_line(ptr) _mm_prefetch((const char *)(ptr), _MM_HINT_T0)
+
+#elif defined(__ARM_NEON)
+
+static inline uint32_t sm48_2cl_match(const void *grp, uint64_t key) {
+    uint32_t key_hi = (uint32_t)(key >> 16);
+    uint16_t key_lo = (uint16_t)key;
+    const uint32_t *hip = sm48_2cl_hi_c(grp);
+    const uint16_t *lop = sm48_2cl_lo_c(grp);
+
+    /* hi[0..15]: 4 × vceqq_u32 → 16-bit mask, scalar [16..19] */
+    uint32x4_t kh = vdupq_n_u32(key_hi);
+    uint32_t mh = 0;
+    mh |= neon_movemask_u32(vceqq_u32(vld1q_u32(hip + 0), kh));
+    mh |= neon_movemask_u32(vceqq_u32(vld1q_u32(hip + 4), kh)) << 4;
+    mh |= neon_movemask_u32(vceqq_u32(vld1q_u32(hip + 8), kh)) << 8;
+    mh |= neon_movemask_u32(vceqq_u32(vld1q_u32(hip + 12), kh)) << 12;
+    if (hip[16] == key_hi) mh |= (1u << 16);
+    if (hip[17] == key_hi) mh |= (1u << 17);
+    if (hip[18] == key_hi) mh |= (1u << 18);
+    if (hip[19] == key_hi) mh |= (1u << 19);
+
+    /* lo[0..15]: 2 × vceqq_u16 → 16-bit mask, scalar [16..19] */
+    uint16x8_t kl = vdupq_n_u16(key_lo);
+    uint32_t ml = 0;
+    ml |= neon_movemask_u16(vceqq_u16(vld1q_u16(lop + 0), kl));
+    ml |= neon_movemask_u16(vceqq_u16(vld1q_u16(lop + 8), kl)) << 8;
+    if (lop[16] == key_lo) ml |= (1u << 16);
+    if (lop[17] == key_lo) ml |= (1u << 17);
+    if (lop[18] == key_lo) ml |= (1u << 18);
+    if (lop[19] == key_lo) ml |= (1u << 19);
+
+    uint64_t ctrl = *sm48_2cl_ctrl_c(grp);
+    return mh & ml & (uint32_t)(ctrl & SM48_2CL_OCC_MASK_);
+}
+
+static inline uint32_t sm48_2cl_empty(const void *grp) {
+    uint64_t ctrl = *sm48_2cl_ctrl_c(grp);
+    return (~(uint32_t)ctrl) & SM48_2CL_OCC_MASK_;
+}
+
+#define sm48_2cl_prefetch_line(ptr) __builtin_prefetch((const void *)(ptr), 0, 3)
 
 #else /* scalar */
 

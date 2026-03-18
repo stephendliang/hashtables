@@ -53,6 +53,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include "simd_compat.h"
 
 #ifndef SMCAT_
 #define SMCAT_(a, b) a##b
@@ -60,7 +61,7 @@
 #endif
 
 /* Hash: CRC32 on SIMD paths, murmur3 finalizer on scalar */
-#if defined(__AVX512F__) || defined(__AVX2__) || defined(__SSE4_2__)
+#if defined(__AVX512F__) || defined(__AVX2__) || defined(__SSE4_2__) || defined(__ARM_FEATURE_CRC32)
 #define sm64_hash(key) ((uint32_t)_mm_crc32_u64(0, (key)))
 #else
 static inline uint32_t sm64_hash(uint64_t key) {
@@ -111,6 +112,28 @@ static inline uint8_t sm64_empty(const uint64_t *grp) {
 }
 
 #define sm64_prefetch_line(ptr) _mm_prefetch((const char *)(ptr), _MM_HINT_T0)
+
+#elif defined(__ARM_NEON)
+
+static inline uint8_t sm64_match(const uint64_t *grp, uint64_t key) {
+    uint64x2_t k = vdupq_n_u64(key);
+    uint32_t m0 = neon_movemask_u64(vceqq_u64(vld1q_u64(grp + 0), k));
+    uint32_t m1 = neon_movemask_u64(vceqq_u64(vld1q_u64(grp + 2), k));
+    uint32_t m2 = neon_movemask_u64(vceqq_u64(vld1q_u64(grp + 4), k));
+    uint32_t m3 = neon_movemask_u64(vceqq_u64(vld1q_u64(grp + 6), k));
+    return (uint8_t)(m0 | (m1 << 2) | (m2 << 4) | (m3 << 6));
+}
+
+static inline uint8_t sm64_empty(const uint64_t *grp) {
+    uint64x2_t z = vdupq_n_u64(0);
+    uint32_t m0 = neon_movemask_u64(vceqq_u64(vld1q_u64(grp + 0), z));
+    uint32_t m1 = neon_movemask_u64(vceqq_u64(vld1q_u64(grp + 2), z));
+    uint32_t m2 = neon_movemask_u64(vceqq_u64(vld1q_u64(grp + 4), z));
+    uint32_t m3 = neon_movemask_u64(vceqq_u64(vld1q_u64(grp + 6), z));
+    return (uint8_t)(m0 | (m1 << 2) | (m2 << 4) | (m3 << 6));
+}
+
+#define sm64_prefetch_line(ptr) __builtin_prefetch((const void *)(ptr), 0, 3)
 
 #else /* Scalar */
 

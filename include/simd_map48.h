@@ -44,6 +44,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include "simd_compat.h"
 
 #ifndef SMCAT_
 #define SMCAT_(a, b) a##b
@@ -55,7 +56,7 @@
 /* Hash: CRC32 on SIMD paths, murmur3 finalizer on scalar */
 struct sm48_h { uint32_t lo, hi; };
 
-#if defined(__SSE4_2__)
+#if defined(__SSE4_2__) || defined(__ARM_FEATURE_CRC32)
 static inline struct sm48_h sm48_hash(uint64_t key) {
     uint32_t a = (uint32_t)_mm_crc32_u64(0, key);
     uint32_t b = (uint32_t)_mm_crc32_u64(a, key);
@@ -237,7 +238,7 @@ static inline void SM_(_val_copy)(struct SM_(_val) *dst, const uint64_t *val) {
 /* Read path: metadata + 3 key cache lines (4 total, vs 5 for sentinel KW=1) */
 static inline void SM_(_prefetch)(const struct SIMD_MAP_NAME *m,
                                     uint64_t key) {
-#if defined(__SSE4_2__)
+#if defined(__SSE4_2__) || defined(__ARM_FEATURE_CRC32)
     uint32_t gi = (uint32_t)_mm_crc32_u64(0, key) & m->mask;
     const char *grp = SM_(_group)(m, gi);
     _mm_prefetch(grp, _MM_HINT_T0);
@@ -258,7 +259,7 @@ static inline void SM_(_prefetch)(const struct SIMD_MAP_NAME *m,
 /* Insert path: metadata line only. */
 static inline void SM_(_prefetch_insert)(const struct SIMD_MAP_NAME *m,
                                           uint64_t key) {
-#if defined(__SSE4_2__)
+#if defined(__SSE4_2__) || defined(__ARM_FEATURE_CRC32)
     uint32_t gi = (uint32_t)_mm_crc32_u64(0, key) & m->mask;
     sm48_prefetch_line(SM_(_group)(m, gi));
 #else

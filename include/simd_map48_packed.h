@@ -48,6 +48,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include "simd_compat.h"
 
 #ifndef SMCAT_
 #define SMCAT_(a, b) a##b
@@ -60,7 +61,7 @@
 /* Hash: CRC32 on SIMD paths, murmur3 finalizer on scalar */
 struct sm48p_h { uint32_t lo, hi; };
 
-#if defined(__SSE4_2__)
+#if defined(__SSE4_2__) || defined(__ARM_FEATURE_CRC32)
 static inline struct sm48p_h sm48p_hash(uint64_t key) {
     uint32_t a = (uint32_t)_mm_crc32_u64(0, key);
     uint32_t b = (uint32_t)_mm_crc32_u64(a, key);
@@ -160,6 +161,37 @@ static inline uint16_t sm48p_empty(const uint16_t *grp) {
 }
 
 #define sm48p_prefetch_line(ptr) _mm_prefetch((const char *)(ptr), _MM_HINT_T0)
+
+#elif defined(__ARM_NEON)
+
+/* NEON vld3q deinterleave: natively splits stride-3 data into 3 registers */
+static inline uint16_t sm48p_match(const uint16_t *grp, uint64_t key) {
+    uint16x8x3_t v = vld3q_u16(grp + 2);  /* deinterleave 24 u16 → 8 per word */
+
+    uint16x8_t k0 = vdupq_n_u16((uint16_t)key);
+    uint16x8_t k1 = vdupq_n_u16((uint16_t)(key >> 16));
+    uint16x8_t k2 = vdupq_n_u16((uint16_t)(key >> 32));
+
+    /* AND all 3 word comparisons → match for keys 0-7 */
+    uint16x8_t m = vandq_u16(vandq_u16(
+        vceqq_u16(v.val[0], k0),
+        vceqq_u16(v.val[1], k1)),
+        vceqq_u16(v.val[2], k2));
+
+    uint16_t result = (uint16_t)neon_movemask_u16(m);
+
+    /* Scalar for keys 8-9 */
+    if (sm48p_read_key(grp, 8) == key) result |= (1u << 8);
+    if (sm48p_read_key(grp, 9) == key) result |= (1u << 9);
+
+    return result & (grp[0] & SM48P_OCC_MASK_);
+}
+
+static inline uint16_t sm48p_empty(const uint16_t *grp) {
+    return (~grp[0]) & SM48P_OCC_MASK_;
+}
+
+#define sm48p_prefetch_line(ptr) __builtin_prefetch((const void *)(ptr), 0, 3)
 
 #else /* scalar */
 

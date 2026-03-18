@@ -42,6 +42,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include "simd_compat.h"
 
 #ifndef SMCAT_
 #define SMCAT_(a, b) a##b
@@ -53,7 +54,7 @@
 /* Hash: two-round CRC32 for group index + overflow partition */
 struct sm48lb_h { uint32_t lo, hi; };
 
-#if defined(__SSE4_2__)
+#if defined(__SSE4_2__) || defined(__ARM_FEATURE_CRC32)
 static inline struct sm48lb_h sm48lb_hash(uint64_t key) {
     uint32_t a = (uint32_t)_mm_crc32_u64(0, key);
     uint32_t b = (uint32_t)_mm_crc32_u64(a, key);
@@ -139,6 +140,40 @@ static inline uint16_t sm48lb_empty(const void *grp) {
 }
 
 #define sm48lb_prefetch_line(ptr) _mm_prefetch((const char *)(ptr), _MM_HINT_T0)
+
+#elif defined(__ARM_NEON)
+
+static inline uint16_t sm48lb_match(const void *grp, uint64_t key) {
+    uint32_t stored_hi = (uint32_t)(key >> 16) + 1;
+    uint16_t key_lo = (uint16_t)key;
+    const uint32_t *hip = sm48lb_hi_c(grp);
+    const uint16_t *lop = sm48lb_lo_c(grp);
+
+    uint32x4_t kh = vdupq_n_u32(stored_hi);
+    uint16_t m_hi = (uint16_t)neon_movemask_u32(vceqq_u32(vld1q_u32(hip + 0), kh));
+    m_hi |= (uint16_t)(neon_movemask_u32(vceqq_u32(vld1q_u32(hip + 4), kh)) << 4);
+    if (hip[8] == stored_hi) m_hi |= (1u << 8);
+    if (hip[9] == stored_hi) m_hi |= (1u << 9);
+
+    uint16x8_t kl = vdupq_n_u16(key_lo);
+    uint16_t m_lo = (uint16_t)neon_movemask_u16(vceqq_u16(vld1q_u16(lop), kl));
+    if (lop[8] == key_lo) m_lo |= (1u << 8);
+    if (lop[9] == key_lo) m_lo |= (1u << 9);
+
+    return m_hi & m_lo;
+}
+
+static inline uint16_t sm48lb_empty(const void *grp) {
+    const uint32_t *hip = sm48lb_hi_c(grp);
+    uint32x4_t z = vdupq_n_u32(0);
+    uint16_t em = (uint16_t)neon_movemask_u32(vceqq_u32(vld1q_u32(hip + 0), z));
+    em |= (uint16_t)(neon_movemask_u32(vceqq_u32(vld1q_u32(hip + 4), z)) << 4);
+    if (hip[8] == 0) em |= (1u << 8);
+    if (hip[9] == 0) em |= (1u << 9);
+    return em;
+}
+
+#define sm48lb_prefetch_line(ptr) __builtin_prefetch((const void *)(ptr), 0, 3)
 
 #else /* scalar */
 

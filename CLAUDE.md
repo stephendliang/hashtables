@@ -1,6 +1,6 @@
 # hmap/ — SIMD hash map library
 
-Header-only C hash sets and maps with AVX-512 and AVX2 backends, designed for
+Header-only C hash sets and maps with AVX-512, AVX2, ARM NEON, and scalar backends, designed for
 memory-latency-bound workloads at 100K+ keys. All containers use open
 addressing with group probing, hugepage allocation (2MB), and prefetch
 pipelining.
@@ -38,7 +38,7 @@ VW=1).
 - Group: 8 key slots (64B) + 8 value slots (8×VW×8B, map mode)
 - Load factor: 75%
 - h2: none (direct compare)
-- Backends: AVX-512 (1 instr/group), AVX2 (5 instr), scalar (portable)
+- Backends: AVX-512 (1 instr/group), AVX2 (5 instr), NEON (4 vceqq), scalar (portable)
 - Delete: backshift (no tombstones)
 - Probe termination: empty slot
 - Prefetch: `_prefetch()` (key + value lines, read paths),
@@ -76,7 +76,7 @@ AVX2 match: 3 broadcasts + 6 cmpeq + shift+AND coalesce + PEXT (~31 instr).
 - Load factor: 7/8 (87.5%)
 - h2: none (direct compare, zero false positives)
 - Overflow: 16 partitions in `grp[1]`, `hash.hi & 15`
-- Backends: AVX2 (broadcast+coalesce), scalar (loop)
+- Backends: AVX2 (broadcast+coalesce), NEON (vld3q deinterleave), scalar (loop)
 - Delete: clear occupancy bit, O(1), no tombstones
 - Probe termination: overflow bit check
 - Prefetch: 1 cache line for both read and write paths
@@ -107,7 +107,7 @@ scalar [8..9], AND (~14 instr).
 - Load factor: 7/8 (87.5%)
 - h2: none (direct compare, zero false positives)
 - Overflow: 16 partitions in ctrl bits [25:10], `hash.hi & 15`
-- Backends: AVX2 (vpcmpeqd + vpcmpeqw), scalar (loop)
+- Backends: AVX2 (vpcmpeqd + vpcmpeqw), NEON (vceqq), scalar (loop)
 - Delete: clear occupancy bit, O(1), no tombstones
 - Probe termination: overflow bit check
 - Prefetch: 1 cache line for both read and write paths
@@ -142,7 +142,7 @@ stored inline after keys (64B keys + 10×VW×8B values).
 - h2: none (direct compare, zero false positives)
 - Overflow: 16-partition ghost bits at offset 60, `hash.hi & 15`
 - Addressing: Lemire fast range reduction (non-pow2 group count)
-- Backends: AVX2 (vpcmpeqd + vpcmpeqw), scalar (loop)
+- Backends: AVX2 (vpcmpeqd + vpcmpeqw), NEON (vceqq), scalar (loop)
 - Delete: backshift (no tombstones), ghost overflow bits never cleared
 - Probe termination: overflow bit check (read paths), empty slot (backshift)
 - Prefetch: `_prefetch()` (key + value lines, read paths),
@@ -234,7 +234,7 @@ irrelevant to the SIMD hot path. All key parameters are `const uint64_t *`.
 - h2: 15-bit (1/32768 false positive rate)
 - Overflow: 16 partitions in sentinel slot, `hash.hi & 15`
 - Hash: chained CRC32 across all words (3 cy), overflow partition deferred
-- Backends: AVX-512, AVX2 (movemask+pext, BMI2), scalar (SWAR)
+- Backends: AVX-512, AVX2 (movemask+pext, BMI2), NEON (vceqq+movemask), scalar (SWAR)
 - Delete: set slot to 0, no backshift, no tombstones
 - Probe termination: sentinel overflow bit check (not empty-slot scan)
 - Prefetch: `_prefetch()` (5 cache lines, read paths),
@@ -262,7 +262,7 @@ slots for data.
 - Metadata: `[15] OCC [14:11] overflow (4 bits) [10:0] h2`
 - Overflow: 4 partitions in bits [14:11], `hash.hi & 3`
 - Hash: chained CRC32, same as sentinel
-- Backends: AVX-512, AVX2 (movemask+pext, BMI2), scalar (SWAR)
+- Backends: AVX-512, AVX2 (movemask+pext, BMI2), NEON (vceqq+movemask), scalar (SWAR)
 - Delete: `&= OVF_FIELD_MASK` (preserves ghost overflow bits)
 - Insert: inherits ghost overflow bits from reused slots via OR
 - Probe termination: SIMD overflow test across all slots (vtestmw / vtestz)
@@ -310,6 +310,13 @@ sequences (ghost overflow bits are monotonically preserved).
 - **AVX2 movemask+pext pattern**: `_mm256_movemask_epi8` gives 2 bits per
   epi16 element; `_pext_u32(..., 0xAAAAAAAA)` extracts odd bits for 1-bit-per-
   slot mask. Two halves (lo/hi) merged with shift+OR for 32-bit result.
+- **NEON movemask emulation**: `vandq` with positional weights (1,2,4,...),
+  `vaddvq` horizontal sum → bitmask. Comparison results are all-ones or
+  all-zeros per lane, so AND extracts the bit directly — no shift or
+  multiply needed (2 ops vs the old 3: USHR+MUL+ADDV). Benchmarked 10%
+  faster than shift+multiply on Apple Silicon. Three variants in
+  `simd_compat.h`: u16 (8-bit), u32 (4-bit), u64 (2-bit via lane extract).
+  Packed 48-bit uses `vld3q_u16` native deinterleave.
 - **Scalar SWAR pattern**: 4 × 16-bit lanes per `uint64_t`. Zero-detection
   uses MSB-guard subtraction (`(v|0x8000...) - 0x0001...`) to prevent
   cross-lane borrows, then `~sub & ~v & 0x8000...` isolates true zeros.
@@ -376,6 +383,7 @@ Source naming: `{purpose}_{type}_{topic}.c` where `test_` = correctness,
 | `KV_BOOST_COMPARISON.md` | Map vs boost::unordered_flat_map: 10 workloads, ANOVA analysis, crossover analysis |
 | `KV64_LAYOUT_ANALYSIS.md` | Map64 superblock layout benchmark: N=1,2,4 × PF 2D grid, read vs write tradeoff |
 | `MAP48_ARCH_ANALYSIS.md` | Map48 architecture comparison: 6 set-mode variants + map-mode TCP benchmark |
+| `ARM_NEON_APPLE_SILICON_BENCHMARKS.md` | ARM NEON Apple Silicon benchmarks: NEON vs scalar, cross-platform vs EPYC AVX-512 |
 
 ### Analysis scripts (`scripts/`)
 
@@ -419,7 +427,9 @@ hit. Prefetch hides this latency PF=24 iterations ahead.
 
 ## Build
 
-Requires `-march=native` (AVX2/AVX-512 backend selection) and BMI2 (`pext`).
+Requires `-march=native` (AVX2/AVX-512/NEON backend selection) and BMI2 (`pext`,
+x86 only). On ARM, CRC32 hash and NEON SIMD are auto-detected via
+`__ARM_FEATURE_CRC32` and `__ARM_NEON`.
 
 ```sh
 make            # build all tests (native + scalar)

@@ -29,6 +29,8 @@
 #define BACKEND_NAME "AVX-512"
 #elif defined(__AVX2__)
 #define BACKEND_NAME "AVX2"
+#elif defined(__ARM_NEON)
+#define BACKEND_NAME "NEON"
 #else
 #define BACKEND_NAME "Scalar"
 #endif

@@ -57,6 +57,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include "simd_compat.h"
 #define SMCAT_(a, b) a##b
 #define SMCAT(a, b)  SMCAT_(a, b)
 #endif
@@ -108,7 +109,7 @@ struct SIMD_MAP_NAME {
 
 struct SM_(_h) { uint32_t lo, hi; };
 
-#if defined(__SSE4_2__)
+#if defined(__SSE4_2__) || defined(__ARM_FEATURE_CRC32)
 static inline struct SM_(_h) SM_(_hash)(const uint64_t *key) {
     uint32_t a = 0;
     for (int i = 0; i < SIMD_MAP_KEY_WORDS; i++)
@@ -189,7 +190,7 @@ static inline void SM_(_val_copy)(struct SM_(_val) *dst, const uint64_t *val) {
 
 static inline void SM_(_prefetch)(const struct SIMD_MAP_NAME *m,
                                    const uint64_t *key) {
-#if defined(__SSE4_2__)
+#if defined(__SSE4_2__) || defined(__ARM_FEATURE_CRC32)
     uint32_t a = 0;
     for (int i = 0; i < SIMD_MAP_KEY_WORDS; i++)
         a = (uint32_t)_mm_crc32_u64(a, key[i]);
@@ -216,7 +217,7 @@ static inline void SM_(_prefetch)(const struct SIMD_MAP_NAME *m,
  * Key/value writes use write-allocate through the store buffer. */
 static inline void SM_(_prefetch_insert)(const struct SIMD_MAP_NAME *m,
                                           const uint64_t *key) {
-#if defined(__SSE4_2__)
+#if defined(__SSE4_2__) || defined(__ARM_FEATURE_CRC32)
     uint32_t a = 0;
     for (int i = 0; i < SIMD_MAP_KEY_WORDS; i++)
         a = (uint32_t)_mm_crc32_u64(a, key[i]);
@@ -268,6 +269,28 @@ static inline uint32_t SM_(_empty)(const uint16_t *meta) {
     return SM_(_movemask16)(_mm256_cmpeq_epi16(lo, z),
                              _mm256_cmpeq_epi16(hi, z))
            & SM_DMSK_;
+}
+
+#elif defined(__ARM_NEON)
+
+static inline uint32_t SM_(_match)(const uint16_t *meta, uint16_t h2) {
+    uint16x8_t needle = vdupq_n_u16(h2);
+    uint32_t result = 0;
+    result |= neon_movemask_u16(vceqq_u16(vld1q_u16(meta + 0), needle));
+    result |= neon_movemask_u16(vceqq_u16(vld1q_u16(meta + 8), needle)) << 8;
+    result |= neon_movemask_u16(vceqq_u16(vld1q_u16(meta + 16), needle)) << 16;
+    result |= neon_movemask_u16(vceqq_u16(vld1q_u16(meta + 24), needle)) << 24;
+    return result & SM_DMSK_;
+}
+
+static inline uint32_t SM_(_empty)(const uint16_t *meta) {
+    uint16x8_t z = vdupq_n_u16(0);
+    uint32_t result = 0;
+    result |= neon_movemask_u16(vceqq_u16(vld1q_u16(meta + 0), z));
+    result |= neon_movemask_u16(vceqq_u16(vld1q_u16(meta + 8), z)) << 8;
+    result |= neon_movemask_u16(vceqq_u16(vld1q_u16(meta + 16), z)) << 16;
+    result |= neon_movemask_u16(vceqq_u16(vld1q_u16(meta + 24), z)) << 24;
+    return result & SM_DMSK_;
 }
 
 #else /* scalar SWAR */
