@@ -1,0 +1,20 @@
+# Map48 arch benchmark (N=2000000, PF=24)
+# variant	workload	ns_per_op	count	alloc_mib
+split	insert_only	7.1	2000000	16.0
+3cl	insert_only	7.7	2000000	24.0
+2cl	insert_only	24.3	2000000	16.0
+backshift	insert_only	5.2	2000000	32.0
+lemire	insert_only	6.6	2000000	14.0
+lem+bs	insert_only	9.2	2000000	14.0
+split	contains_hit	6.7	2000000	16.0
+3cl	contains_hit	6.7	2000000	24.0
+2cl	contains_hit	7.9	2000000	16.0
+backshift	contains_hit	3.6	2000000	32.0
+lemire	contains_hit	9.5	2000000	14.0
+lem+bs	contains_hit	8.2	2000000	14.0
+split	mixed_50_25_25	8.4	2500454	32.0
+3cl	mixed_50_25_25	14.3	2500454	48.0
+2cl	mixed_50_25_25	11.0	2500454	32.0
+backshift	mixed_50_25_25	8.6	2500454	64.0
+lemire	mixed_50_25_25	8.5	2500454	28.0
+lem+bs	mixed_50_25_25	8.7	2500454	28.0

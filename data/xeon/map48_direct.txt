@@ -1,0 +1,14 @@
+# Map48 direct-compare benchmark (N=2000000, PF=24)
+# variant	workload	ns_per_op	count
+packed	insert_only	8.4	2000000
+split	insert_only	7.7	2000000
+map48	insert_only	33.3	2000000
+map64	insert_only	4.0	2000000
+packed	contains_hit	5.1	2000000
+split	contains_hit	7.0	2000000
+map48	contains_hit	7.5	2000000
+map64	contains_hit	3.1	2000000
+packed	mixed_50_25_25	8.5	2500454
+split	mixed_50_25_25	8.5	2500454
+map48	mixed_50_25_25	10.1	2500454
+map64	mixed_50_25_25	7.4	2500454

@@ -1,0 +1,18 @@
+simd_set64 backend: AVX2
+N=1000000  ops=10000000  zipf_s=1.00
+
+  insert:    167.9 Mops/s  (763858 unique, 92.4% dup)
+  lookup+:   270.6 Mops/s
+  lookup±:   251.2 Mops/s  (92.9% hit)
+  mixed workloads (z=1.0):
+  delete:    200.0 Mops/s  (pool=1000000)
+    read-heavy   90/ 5/ 5:   175.9 Mops/s   verify: OK
+                 post-churn:  hit  464.2  miss  314.2 Mops/s  (live=498847)
+    balanced     50/25/25:   113.1 Mops/s   verify: OK
+                 post-churn:  hit  456.1  miss  310.0 Mops/s  (live=502595)
+    churn        33/33/34:   104.5 Mops/s   verify: OK
+                 post-churn:  hit  467.0  miss  378.5 Mops/s  (live=400876)
+    write-heavy  10/50/40:    78.9 Mops/s   verify: OK
+                 post-churn:  hit  362.7  miss   46.0 Mops/s  (live=999996)
+    eviction     20/10/70:   214.8 Mops/s   verify: OK
+                 post-churn:  hit    9.8  miss  400.0 Mops/s  (live=2)

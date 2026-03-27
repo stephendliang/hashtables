@@ -1,0 +1,11 @@
+# Map48 benchmark (N=2000000, PF=24)
+# variant	workload	ns_per_op	count	bytes_per_entry
+map48	insert_only	38.9	2000000	16.8
+sentinel	insert_only	27.7	2000000	21.0
+map64	insert_only	3.9	2000000	16.8
+map48	contains_hit	7.1	2000000	-
+sentinel	contains_hit	8.5	2000000	-
+map64	contains_hit	3.1	2000000	-
+map48	mixed_50_25_25	9.7	2500454	-
+sentinel	mixed_50_25_25	10.2	2500454	-
+map64	mixed_50_25_25	7.4	2500454	-
